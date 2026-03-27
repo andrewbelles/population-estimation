@@ -40,6 +40,10 @@ class RasterConfig:
     source_globs: list[str]
     raw_subdir: str
     tensor_subdir: str
+    bag_subdir: str
+    tile_size: int
+    tile_window_km: float
+    write_stats: bool
     canonical_name: str | None = None
     rewrite_source_dir: bool = False
     preserve_name: bool = False
@@ -136,6 +140,10 @@ def _parse_raster_cfg(section: dict[str, Any]) -> RasterConfig:
         source_globs=[str(x) for x in _require(section, "source_globs")],
         raw_subdir=str(section.get("raw_subdir", "")),
         tensor_subdir=str(section.get("tensor_subdir", "")),
+        bag_subdir=str(section.get("bag_subdir", "")),
+        tile_size=int(section.get("tile_size", 32)),
+        tile_window_km=float(section.get("tile_window_km", 24.0)),
+        write_stats=bool(section.get("write_stats", True)),
         canonical_name=None if section.get("canonical_name") in (None, "") else str(section.get("canonical_name")),
         rewrite_source_dir=bool(section.get("rewrite_source_dir", False)),
         preserve_name=bool(section.get("preserve_name", False)),

@@ -1,0 +1,151 @@
+years: [2020, 2021, 2022, 2023, 2024]
+modalities: [admin, viirs, s5p]
+
+paths:
+  geo_coords_path: ingestion/metadata/geography/2020_Gaz_counties_national.txt
+  run_root: manifold/checkpoints
+
+admin:
+  enabled: true
+  input_template: ingestion/data/datasets/tabular/usps_scalar/usps_scalar_{year}.parquet
+  output_parquet: manifold/data/admin_embeddings.parquet
+  family_tag_base: tabdae_vime8
+  epochs: 120
+  batch_size: 256
+  embed_dim: 8
+  hidden_dim: 128
+  swap_noise_prob: 0.30
+  feature_dropout_prob: 0.30
+  mask_loss_weight: 1.0
+  lr: 0.001
+  muon_lr: 0.001
+  muon_momentum: 0.95
+  muon_optimizer_spec: muon:Muon
+  weight_decay: 0.000001
+  grad_clip: 1.0
+  seed: 42
+  device: cuda
+  use_amp: true
+  amp_dtype: bfloat16
+
+viirs:
+  enabled: true
+  input_template: ingestion/data/datasets/tensors/viirs/bags/viirs_{year}
+  output_parquet: manifold/data/viirs_embeddings.parquet
+  family_tag_base: byol_viirs24km32_flatrad
+  epochs: 20
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  max_tiles_per_bag: 32
+  embed_dim: 64
+  proj_dim: 128
+  tile_shape: [1, 32, 32]
+  spatial_widths: [32, 64, 128]
+  spatial_depths: [2, 2, 2]
+  dw_kernel_size: 5
+  small_tile_cifar_stem: true
+  crop_scale_min: 0.7
+  crop_scale_max: 1.0
+  attn_hidden: 128
+  attn_dropout: 0.0
+  ssl_objective: byol
+  mae_mask_ratio: 0.4
+  mae_patch_size: 4
+  mae_decoder_hidden: 256
+  mae_loss_kind: l1
+  w_byol: 1.0
+  w_geo: 0.1
+  w_hsic: 0.0
+  use_byol_contrastive: true
+  byol_only_epochs: 0
+  geo_rank_k: 32
+  geo_rank_dmax_km: 125.0
+  geo_rank_softrank_strength: 0.001
+  geo_rank_normalize_rank: false
+  geo_rank_neighbor_backend: ball_tree
+  geo_rank_same_county_eps_km: 0.000001
+  optimizer_mode: muon_conv_linear
+  lr: 0.0001
+  muon_momentum: 0.95
+  muon_optimizer_spec: muon:Muon
+  weight_decay: 0.000001
+  tau_base: 0.99
+  tau_final: 1.0
+  grad_clip: 1.0
+  seed: 42
+  device: cuda
+  use_amp: true
+  amp_dtype: bfloat16
+  flatten: true
+  radiance_sampling: true
+  radiance_weight_mode: active_count
+  radiance_active_threshold: 0.03
+  radiance_weight_gamma: 1.5
+  radiance_min_weight: 0.000001
+  radiance_clip_pctl: 99.5
+  radiance_samples_per_epoch: 0
+  tile_window_km: 24.0
+
+s5p:
+  enabled: true
+  input_template: ingestion/data/datasets/tensors/s5p/bags/s5p_{year}
+  output_parquet: manifold/data/s5p_embeddings.parquet
+  family_tag_base: byol_nitrous24km32
+  epochs: 20
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  max_tiles_per_bag: 32
+  embed_dim: 64
+  proj_dim: 128
+  tile_shape: [1, 32, 32]
+  spatial_widths: [32, 64, 128]
+  spatial_depths: [2, 2, 2]
+  dw_kernel_size: 5
+  small_tile_cifar_stem: true
+  crop_scale_min: 0.7
+  crop_scale_max: 1.0
+  attn_hidden: 128
+  attn_dropout: 0.0
+  ssl_objective: byol
+  mae_mask_ratio: 0.4
+  mae_patch_size: 4
+  mae_decoder_hidden: 256
+  mae_loss_kind: l1
+  w_byol: 1.0
+  w_geo: 0.1
+  w_hsic: 0.0
+  use_byol_contrastive: true
+  byol_only_epochs: 0
+  geo_rank_k: 32
+  geo_rank_dmax_km: 125.0
+  geo_rank_softrank_strength: 0.001
+  geo_rank_normalize_rank: false
+  geo_rank_neighbor_backend: ball_tree
+  geo_rank_same_county_eps_km: 0.000001
+  optimizer_mode: muon_conv_linear
+  lr: 0.0001
+  muon_momentum: 0.95
+  muon_optimizer_spec: muon:Muon
+  weight_decay: 0.000001
+  tau_base: 0.99
+  tau_final: 1.0
+  grad_clip: 1.0
+  seed: 42
+  device: cuda
+  use_amp: true
+  amp_dtype: bfloat16
+  flatten: true
+  radiance_sampling: false
+  radiance_weight_mode: active_count
+  radiance_active_threshold: 0.03
+  radiance_weight_gamma: 1.5
+  radiance_min_weight: 0.000001
+  radiance_clip_pctl: 99.5
+  radiance_samples_per_epoch: 0
+  tile_window_km: 24.0

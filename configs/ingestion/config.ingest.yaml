@@ -28,6 +28,10 @@ viirs:
   stage_compressed: true
   raw_subdir: viirs
   tensor_subdir: tensors/viirs
+  bag_subdir: tensors/viirs/bags
+  tile_size: 32
+  tile_window_km: 24.0
+  write_stats: true
 
 s5p:
   enabled: true
@@ -39,6 +43,10 @@ s5p:
   stage_compressed: true
   raw_subdir: s5p
   tensor_subdir: tensors/s5p
+  bag_subdir: tensors/s5p/bags
+  tile_size: 32
+  tile_window_km: 24.0
+  write_stats: true
 
 usps:
   enabled: true

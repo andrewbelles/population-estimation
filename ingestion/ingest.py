@@ -179,7 +179,7 @@ def run(config: IngestConfig, *, skip_existing: bool = False) -> dict[str, objec
 
     LOGGER.debug("ingestion start years=%s..%s", config.years.start, config.years.end)
 
-    total_stages = 6
+    total_stages = 8
     viirs_outputs = _run_stage(1, total_stages, "VIIRS tensors", viirs.run, config, skip_existing=bool(skip_existing))
     LOGGER.debug("viirs tensors=%d outputs=%s", len(viirs_outputs), [str(p) for p in viirs_outputs])
     s5p_outputs = _run_stage(2, total_stages, "S5P tensors", s5p.run, config, skip_existing=bool(skip_existing))
@@ -202,10 +202,16 @@ def run(config: IngestConfig, *, skip_existing: bool = False) -> dict[str, objec
         skip_existing=bool(skip_existing),
     )
     LOGGER.debug("merged admin panel=%s", merged_panel)
+    viirs_bags = _run_stage(7, total_stages, "VIIRS tile bags", viirs.build_bags, config, skip_existing=bool(skip_existing))
+    LOGGER.debug("viirs bag roots=%d outputs=%s", len(viirs_bags), [str(p) for p in viirs_bags])
+    s5p_bags = _run_stage(8, total_stages, "S5P tile bags", s5p.build_bags, config, skip_existing=bool(skip_existing))
+    LOGGER.debug("s5p bag roots=%d outputs=%s", len(s5p_bags), [str(p) for p in s5p_bags])
 
     outputs: dict[str, object] = {
         "viirs_tensors": [str(p) for p in viirs_outputs],
         "s5p_tensors": [str(p) for p in s5p_outputs],
+        "viirs_bags": [str(p) for p in viirs_bags],
+        "s5p_bags": [str(p) for p in s5p_bags],
         "usps_raw": [str(p) for p in usps_raw],
         "usps_table": None if usps_table is None else str(usps_table),
         "pep_table": None if pep_table is None else str(pep_table),
