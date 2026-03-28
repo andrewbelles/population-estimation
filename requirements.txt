@@ -22,6 +22,8 @@ geopandas
 rasterio
 fiona
 rasterstats
+shapely
+pyarrow
 
 # Machine Learning Libraries 
 libpysal 
@@ -34,3 +36,7 @@ torchvision
 torch-geometric
 torch-scatter
 torch-sparse
+
+# manifold/objectives.py imports torchsort directly. On some systems it may need
+# a source build against the local torch install instead of a prebuilt wheel.
+torchsort

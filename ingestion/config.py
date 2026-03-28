@@ -58,7 +58,9 @@ class USPSConfig:
     zip_glob: str
     gpkg_template: str
     table_path: Path
-    prev_scalar_mat_template: str | None = None
+    tracts_root: Path | None = None
+    tracts_year: int = 2023
+    tracts_download_url_template: str = "https://www2.census.gov/geo/tiger/TIGER{year}/TRACT/tl_{year}_{statefp}_tract.zip"
 
 
 @dataclass(slots=True)
@@ -67,9 +69,9 @@ class PEPConfig:
     census_2020_csv: Path
     census_2023_csv: Path
     census_2024_csv: Path
+    census_2020_truth_csv: Path
+    intercensal_state_split_glob: str
     table_path: Path
-    wide_2020_mat: Path | None = None
-    pep_2020_mat: Path | None = None
     pep_2020_anchor: str = "with_resid"
 
 
@@ -159,7 +161,14 @@ def _parse_usps_cfg(section: dict[str, Any]) -> USPSConfig:
         zip_glob=str(section.get("zip_glob", "*.zip")),
         gpkg_template=str(_require(section, "gpkg_template")),
         table_path=_as_path(_require(section, "table_path")),
-        prev_scalar_mat_template=None if section.get("prev_scalar_mat_template") in (None, "") else str(section.get("prev_scalar_mat_template")),
+        tracts_root=None if section.get("tracts_root") in (None, "") else _as_path(section.get("tracts_root")),
+        tracts_year=int(section.get("tracts_year", 2023)),
+        tracts_download_url_template=str(
+            section.get(
+                "tracts_download_url_template",
+                "https://www2.census.gov/geo/tiger/TIGER{year}/TRACT/tl_{year}_{statefp}_tract.zip",
+            )
+        ),
     )
 
 
@@ -169,9 +178,9 @@ def _parse_pep_cfg(section: dict[str, Any]) -> PEPConfig:
         census_2020_csv=_as_path(_require(section, "census_2020_csv")),
         census_2023_csv=_as_path(_require(section, "census_2023_csv")),
         census_2024_csv=_as_path(_require(section, "census_2024_csv")),
+        census_2020_truth_csv=_as_path(_require(section, "census_2020_truth_csv")),
+        intercensal_state_split_glob=str(_require(section, "intercensal_state_split_glob")),
         table_path=_as_path(_require(section, "table_path")),
-        wide_2020_mat=None if section.get("wide_2020_mat") in (None, "") else _as_path(section.get("wide_2020_mat")),
-        pep_2020_mat=None if section.get("pep_2020_mat") in (None, "") else _as_path(section.get("pep_2020_mat")),
         pep_2020_anchor=str(section.get("pep_2020_anchor", "with_resid")),
     )
 

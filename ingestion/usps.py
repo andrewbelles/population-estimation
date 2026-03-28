@@ -7,15 +7,18 @@
 
 from __future__ import annotations
 
+import functools
 import logging
+import shutil
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from scipy.io import loadmat
 
-from ingestion.common import ensure_dir, materialize_source, parquet_has_rows, stage_copy, write_parquet
+from ingestion.common import ensure_dir, parquet_has_rows, stage_copy, write_parquet
 from ingestion.config import IngestConfig
 
 
@@ -47,13 +50,43 @@ def _sum_if_exists(group: pd.DataFrame, cols: list[str]) -> float:
     return float(val if used else np.nan)
 
 
-def _mat_str_vector(arr: np.ndarray) -> np.ndarray:
-    vals = np.asarray(arr)
-    if vals.ndim == 0:
-        vals = vals.reshape(1)
-    if vals.ndim > 1:
-        vals = vals.reshape(-1)
-    return np.asarray([str(v).strip() for v in vals.tolist()], dtype="U")
+def _zip_candidates_for_year(config: IngestConfig, *, year: int) -> list[Path]:
+    roots = [config.usps.source_dir, config.paths.raw_root / config.usps.raw_subdir]
+    hits: list[Path] = []
+    seen: set[str] = set()
+    year_token = str(int(year))
+    for root in roots:
+        if not Path(root).exists():
+            continue
+        for path in sorted(Path(root).glob(config.usps.zip_glob)):
+            if year_token not in path.name:
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(path)
+    return hits
+
+
+def _year_assets_available(config: IngestConfig, *, year: int) -> bool:
+    gpkg_name = config.usps.gpkg_template.format(year=int(year))
+    gpkg_candidates = [
+        config.usps.source_dir / gpkg_name,
+        config.paths.raw_root / config.usps.raw_subdir / gpkg_name,
+    ]
+    return any(path.exists() for path in gpkg_candidates) or bool(_zip_candidates_for_year(config, year=int(year)))
+
+
+def _aggregation_years(config: IngestConfig) -> list[int]:
+    years = {int(y) for y in config.years.values}
+    if not years:
+        return []
+    min_year = min(years)
+    prev_year = int(min_year) - 1
+    if _year_assets_available(config, year=int(prev_year)):
+        years.add(int(prev_year))
+    return sorted(years)
 
 
 def _stage_raw_inputs(config: IngestConfig) -> list[Path]:
@@ -61,13 +94,267 @@ def _stage_raw_inputs(config: IngestConfig) -> list[Path]:
     staged: list[Path] = []
     for path in sorted(config.usps.source_dir.glob(config.usps.zip_glob)):
         staged.append(stage_copy(path, raw_dir / path.name))
-    for year in config.years.values:
+    for year in _aggregation_years(config):
         gpkg_name = config.usps.gpkg_template.format(year=int(year))
         gpkg_path = config.usps.source_dir / gpkg_name
         if gpkg_path.exists():
             staged.append(stage_copy(gpkg_path, raw_dir / gpkg_path.name))
     LOGGER.debug("staged usps raw files=%d", len(staged))
     return staged
+
+
+def _effective_tracts_root(config: IngestConfig) -> Path:
+    if config.usps.tracts_root is not None:
+        return Path(config.usps.tracts_root).expanduser()
+    return config.paths.metadata_root / "geography" / "tract_shapefiles"
+
+
+def _tract_zip_path(root: Path, *, year: int, state_fips: str) -> Path:
+    return Path(root) / f"tl_{int(year)}_{str(state_fips).zfill(2)}_tract.zip"
+
+
+def _tract_shapefile_path(root: Path, *, year: int, state_fips: str) -> Path:
+    return Path(root) / f"tl_{int(year)}_{str(state_fips).zfill(2)}_tract.shp"
+
+
+def _download_tract_zip(config: IngestConfig, *, year: int, state_fips: str, zip_path: Path) -> Path:
+    url = str(config.usps.tracts_download_url_template).format(year=int(year), statefp=str(state_fips).zfill(2))
+    ensure_dir(zip_path.parent)
+    LOGGER.info("download census tracts state=%s year=%d -> %s", str(state_fips).zfill(2), int(year), zip_path)
+    with urllib.request.urlopen(url, timeout=120) as src, open(zip_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return zip_path
+
+
+def _ensure_tract_shapefiles(config: IngestConfig, *, state_fips: list[str]) -> Path:
+    root = ensure_dir(_effective_tracts_root(config))
+    year = int(config.usps.tracts_year)
+    for state in sorted({str(s).zfill(2) for s in state_fips if str(s).strip()}):
+        shp_path = _tract_shapefile_path(root, year=year, state_fips=state)
+        if shp_path.exists():
+            continue
+        zip_path = _tract_zip_path(root, year=year, state_fips=state)
+        if not zip_path.exists():
+            _download_tract_zip(config, year=year, state_fips=state, zip_path=zip_path)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(root)
+        if not shp_path.exists():
+            raise FileNotFoundError(f"expected extracted tract shapefile missing after unzip: {shp_path}")
+    return root
+
+
+def _tract_root_covers_states(root: Path, *, year: int, state_fips: list[str]) -> bool:
+    need = {str(s).zfill(2) for s in state_fips if str(s).strip()}
+    if not need:
+        return False
+    return all(_tract_shapefile_path(root, year=int(year), state_fips=state).exists() for state in sorted(need))
+
+
+def _find_tract_files(root: Path) -> list[Path]:
+    return sorted(Path(root).rglob("*tract*.shp"))
+
+
+@functools.lru_cache(maxsize=2)
+def _load_tract_master_cached(root_str: str) -> gpd.GeoDataFrame:
+    root = Path(root_str).expanduser()
+    tract_files = _find_tract_files(root)
+    if not tract_files:
+        raise FileNotFoundError(f"no tract shapefiles found under {root}")
+    tracts = gpd.GeoDataFrame(
+        pd.concat([gpd.read_file(path)[["GEOID", "geometry"]] for path in tract_files], ignore_index=True)
+    )
+    tracts["GEOID"] = tracts["GEOID"].astype(str).str.zfill(11)
+    tracts = tracts.drop_duplicates(subset=["GEOID"], keep="first").reset_index(drop=True)
+    return tracts
+
+
+@functools.lru_cache(maxsize=8)
+def _load_tract_master_from_gpkg_cached(path_str: str) -> gpd.GeoDataFrame:
+    path = Path(path_str).expanduser()
+    gdf = gpd.read_file(path)[["GEOID", "geometry"]].copy()
+    gdf["GEOID"] = gdf["GEOID"].astype(str).str.zfill(11)
+    gdf = gdf.drop_duplicates(subset=["GEOID"], keep="first").reset_index(drop=True)
+    return gdf
+
+
+def _geometry_seed_candidates(config: IngestConfig, *, exclude_year: int | None = None) -> list[Path]:
+    roots = [config.paths.raw_root / config.usps.raw_subdir, config.usps.source_dir]
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not Path(root).exists():
+            continue
+        for path in sorted(Path(root).glob("usps_master_tracts_*.gpkg")):
+            if exclude_year is not None and str(int(exclude_year)) in path.stem:
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _load_tract_master(config: IngestConfig, *, target_year: int, state_fips_required: list[str]) -> gpd.GeoDataFrame:
+    root = _effective_tracts_root(config)
+    if _tract_root_covers_states(root, year=int(config.usps.tracts_year), state_fips=state_fips_required):
+        tract_files = _find_tract_files(root)
+        if tract_files:
+            return _load_tract_master_cached(str(root))
+    seed_candidates = _geometry_seed_candidates(config, exclude_year=int(target_year))
+    if not seed_candidates:
+        root = _ensure_tract_shapefiles(config, state_fips=state_fips_required)
+        tract_files = _find_tract_files(root)
+        if tract_files:
+            return _load_tract_master_cached(str(root))
+    for gpkg_path in _geometry_seed_candidates(config, exclude_year=int(target_year)):
+        if gpkg_path.exists():
+            LOGGER.debug("use existing usps gpkg geometry seed target_year=%d source=%s", int(target_year), gpkg_path)
+            return _load_tract_master_from_gpkg_cached(str(gpkg_path.resolve()))
+    if not _tract_root_covers_states(root, year=int(config.usps.tracts_year), state_fips=state_fips_required):
+        root = _ensure_tract_shapefiles(config, state_fips=state_fips_required)
+        tract_files = _find_tract_files(root)
+        if tract_files:
+            return _load_tract_master_cached(str(root))
+    raise FileNotFoundError(
+        "missing tract geometry source for USPS ZIP conversion after tract download and GPKG-seed fallback"
+    )
+
+
+def _load_usps_attrs(path: Path) -> pd.DataFrame:
+    gdf = gpd.read_file(path)
+    df = pd.DataFrame(gdf.drop(columns="geometry", errors="ignore"))
+    df.columns = [str(c).lower() for c in df.columns]
+    if "geoid" not in df.columns:
+        raise ValueError(f"{path}: missing USPS geoid column")
+    df["geoid"] = df["geoid"].astype(str).str.zfill(11)
+    df = df.rename(columns={"geoid": "GEOID"})
+
+    required_cols = [
+        "GEOID",
+        "ams_res",
+        "ams_bus",
+        "ams_oth",
+        "res_vac",
+        "bus_vac",
+        "oth_vac",
+        "nostat_res",
+        "nostat_bus",
+        "nostat_oth",
+    ]
+    optional_cols = [
+        "vac_3_res",
+        "vac_3_6_r",
+        "vac_6_12r",
+        "vac_12_24r",
+        "vac_24_36r",
+        "vac_36_res",
+    ]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"{path}: missing USPS DBF columns {missing}")
+
+    keep_cols = [*required_cols, *[c for c in optional_cols if c in df.columns]]
+    df = df.loc[:, keep_cols].copy()
+    for col in keep_cols[1:]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=required_cols[1:], how="all").reset_index(drop=True)
+
+
+def _compute_usps_channels(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["total_res"] = out["ams_res"].fillna(0.0) + out["res_vac"].fillna(0.0) + out["nostat_res"].fillna(0.0)
+    out["total_business"] = out["ams_bus"].fillna(0.0) + out["bus_vac"].fillna(0.0) + out["nostat_bus"].fillna(0.0)
+    out["total_other"] = out["ams_oth"].fillna(0.0) + out["oth_vac"].fillna(0.0) + out["nostat_oth"].fillna(0.0)
+    out["total_addresses"] = out["total_res"] + out["total_business"] + out["total_other"]
+    out = out.loc[out["total_addresses"] > 0.0].copy()
+
+    out["comm_ratio"] = out["total_business"] / np.maximum(out["total_addresses"], 1.0)
+    total_nostat = out["nostat_res"].fillna(0.0) + out["nostat_bus"].fillna(0.0) + out["nostat_oth"].fillna(0.0)
+    out["flux_rate"] = total_nostat / np.maximum(out["total_addresses"], 1.0)
+
+    short_cols = [c for c in ["vac_3_res"] if c in out.columns]
+    long_cols = [c for c in ["vac_3_6_r", "vac_6_12r", "vac_12_24r", "vac_24_36r", "vac_36_res"] if c in out.columns]
+    if short_cols:
+        vac_short = np.zeros(len(out), dtype=np.float64)
+        for col in short_cols:
+            vac_short += pd.to_numeric(out[col], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+    else:
+        vac_short = pd.to_numeric(out["res_vac"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+    if long_cols:
+        vac_long = np.zeros(len(out), dtype=np.float64)
+        for col in long_cols:
+            vac_long += pd.to_numeric(out[col], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+    else:
+        res_vac = pd.to_numeric(out["res_vac"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        vac_long = np.clip(res_vac - vac_short, a_min=0.0, a_max=None)
+
+    out["vac_short_res"] = vac_short
+    out["vac_long_res"] = vac_long
+    return out
+
+
+def _extract_usps_dbf(zip_path: Path, *, year: int, extract_root: Path) -> Path:
+    out_dir = ensure_dir(extract_root / str(int(year)))
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        dbf_members = [name for name in zf.namelist() if (not name.endswith("/")) and name.lower().endswith(".dbf")]
+        if not dbf_members:
+            raise RuntimeError(f"{zip_path}: USPS ZIP has no DBF member")
+        member = sorted(dbf_members)[0]
+        dbf_path = out_dir / Path(member).name
+        if not dbf_path.exists():
+            with zf.open(member, "r") as src, open(dbf_path, "wb") as dst:
+                dst.write(src.read())
+    return dbf_path
+
+
+def _build_usps_gpkg(config: IngestConfig, dbf_path: Path, *, year: int, out_path: Path) -> Path:
+    usps_raw = _load_usps_attrs(dbf_path)
+    state_fips = sorted({str(g)[:2] for g in usps_raw["GEOID"].astype(str).tolist() if str(g)})
+    tracts = _load_tract_master(config, target_year=int(year), state_fips_required=state_fips)
+    usps = _compute_usps_channels(usps_raw)
+    merged = tracts.merge(
+        usps[
+            [
+                "GEOID",
+                "flux_rate",
+                "comm_ratio",
+                "total_res",
+                "total_other",
+                "total_business",
+                "total_addresses",
+                "res_vac",
+                "nostat_res",
+                "vac_short_res",
+                "vac_long_res",
+            ]
+        ],
+        on="GEOID",
+        how="inner",
+    )
+    ensure_dir(out_path.parent)
+    merged.to_file(out_path, driver="GPKG")
+    return out_path
+
+
+def _ensure_gpkg_for_year(config: IngestConfig, *, year: int) -> Path | None:
+    raw_dir = ensure_dir(config.paths.raw_root / config.usps.raw_subdir)
+    gpkg_path = raw_dir / config.usps.gpkg_template.format(year=int(year))
+    if gpkg_path.exists():
+        return gpkg_path
+
+    source_gpkg = config.usps.source_dir / config.usps.gpkg_template.format(year=int(year))
+    if source_gpkg.exists():
+        return stage_copy(source_gpkg, gpkg_path)
+
+    zip_candidates = _zip_candidates_for_year(config, year=int(year))
+    if not zip_candidates:
+        return None
+    zip_path = zip_candidates[0]
+    staged_zip = stage_copy(zip_path, raw_dir / zip_path.name)
+    dbf_path = _extract_usps_dbf(staged_zip, year=int(year), extract_root=raw_dir / "_extracted")
+    LOGGER.debug("build usps gpkg from zip year=%d zip=%s dbf=%s out=%s", int(year), staged_zip, dbf_path, gpkg_path)
+    return _build_usps_gpkg(config, dbf_path, year=int(year), out_path=gpkg_path)
 
 
 def _load_county_area_map(county_shapefile: Path) -> dict[str, float]:
@@ -178,40 +465,11 @@ def _aggregate_one_year(gpkg_path: Path, county_shapefile: Path, *, year: int) -
     return df.sort_values(["year", "fips"]).reset_index(drop=True)
 
 
-def _load_prev_total_res_by_fips(path: Path) -> dict[str, float]:
-    if not path.exists():
-        return {}
-    mat = loadmat(str(path))
-    required = {"features", "feature_names", "fips_codes"}
-    if not required.issubset(mat):
-        return {}
-    x = np.asarray(mat["features"], dtype=np.float64)
-    names = _mat_str_vector(mat["feature_names"])
-    fips = np.asarray([str(v).strip().zfill(5) for v in _mat_str_vector(mat["fips_codes"]).tolist()], dtype="U5")
-    if x.ndim != 2 or x.shape[0] != fips.shape[0]:
-        return {}
-    name_to_idx = {str(name): i for i, name in enumerate(names.tolist())}
-    idx = None
-    for cand in ("usps_total_res", "total_res"):
-        if cand in name_to_idx:
-            idx = int(name_to_idx[cand])
-            break
-    if idx is None:
-        return {}
-    vals = np.asarray(x[:, idx], dtype=np.float64).reshape(-1)
-    out: dict[str, float] = {}
-    for fips_code, value in zip(fips.tolist(), vals.tolist()):
-        if np.isfinite(value):
-            out[str(fips_code)] = float(value)
-    return out
-
-
-def _apply_residency_velocity(panel: pd.DataFrame, config: IngestConfig) -> pd.DataFrame:
+def _apply_residency_velocity(panel: pd.DataFrame) -> pd.DataFrame:
     out = panel.sort_values(["year", "fips"]).reset_index(drop=True).copy()
     out["usps_residency_velocity"] = 0.0
     by_year = {int(year): frame.copy() for year, frame in out.groupby("year", sort=True)}
     years_sorted = sorted(by_year)
-    prev_template = config.usps.prev_scalar_mat_template
     prev_maps_from_panel: dict[int, dict[str, float]] = {}
     for prev_year in years_sorted:
         part = by_year[prev_year]
@@ -223,20 +481,8 @@ def _apply_residency_velocity(panel: pd.DataFrame, config: IngestConfig) -> pd.D
             )
         }
     for year in years_sorted:
-        prev_map: dict[str, float] = {}
         prev_year = int(year) - 1
-        if prev_template:
-            prev_path = Path(str(prev_template).format(year=int(prev_year))).expanduser()
-            try:
-                prev_path = materialize_source(
-                    prev_path,
-                    [prev_path, Path(f"data/datasets/usps_scalar_{int(prev_year)}.mat")],
-                )
-                prev_map = _load_prev_total_res_by_fips(prev_path)
-            except FileNotFoundError:
-                prev_map = {}
-        if not prev_map:
-            prev_map = prev_maps_from_panel.get(int(prev_year), {})
+        prev_map = prev_maps_from_panel.get(int(prev_year), {})
         if not prev_map:
             continue
         mask = np.asarray(out["year"], dtype=np.int64) == int(year)
@@ -260,15 +506,19 @@ def run(config: IngestConfig, *, skip_existing: bool = False) -> tuple[list[Path
 
     staged = _stage_raw_inputs(config)
     frames: list[pd.DataFrame] = []
-    for year in config.years.values:
-        gpkg_path = config.paths.raw_root / config.usps.raw_subdir / config.usps.gpkg_template.format(year=int(year))
-        if gpkg_path.exists():
+    use_years = _aggregation_years(config)
+    for year in use_years:
+        gpkg_path = _ensure_gpkg_for_year(config, year=int(year))
+        if gpkg_path is not None and gpkg_path.exists():
             frames.append(_aggregate_one_year(gpkg_path, config.paths.county_shapefile, year=int(year)))
     if not frames:
         LOGGER.debug("no usps yearly frames produced")
         return staged, None
     merged = pd.concat(frames, axis=0, ignore_index=True)
-    merged = _apply_residency_velocity(merged, config)
+    merged = _apply_residency_velocity(merged)
+    target_years = {int(y) for y in config.years.values}
+    merged = merged.loc[merged["year"].astype(int).isin(target_years)].copy()
+    merged = merged.sort_values(["year", "fips"]).reset_index(drop=True)
     write_parquet(merged, config.usps.table_path)
     LOGGER.debug("usps merged rows=%d out=%s", int(merged.shape[0]), config.usps.table_path)
     return staged, config.usps.table_path

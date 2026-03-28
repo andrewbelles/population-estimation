@@ -55,16 +55,15 @@ usps:
   zip_glob: usps_vac_*_tractsum_2kx.zip
   gpkg_template: usps_master_tracts_{year}.gpkg
   table_path: ingestion/data/datasets/tabular/usps_county_admin_2020_2024.parquet
-  prev_scalar_mat_template: ingestion/data/raw/supervision/usps_scalar_{year}.mat
 
 pep:
   enabled: true
   census_2020_csv: ingestion/data/raw/census/co-est2020-alldata.csv
   census_2023_csv: ingestion/data/raw/census/co-est2023-alldata.csv
   census_2024_csv: ingestion/data/raw/census/co-est2024-alldata.csv
+  census_2020_truth_csv: ingestion/data/raw/census/census2020_county_pl.csv
+  intercensal_state_split_glob: ingestion/data/raw/census/intercensal/county/co-est2020int-pop-*.xlsx
   table_path: ingestion/data/datasets/tabular/pep_county_estimates_2020_2024.parquet
-  wide_2020_mat: ingestion/data/raw/supervision/wide_scalar_2020.mat
-  pep_2020_mat: ingestion/data/raw/supervision/pep_arithmetic_2020.mat
   pep_2020_anchor: with_resid
 
 admin:
