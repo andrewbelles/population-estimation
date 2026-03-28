@@ -5,8 +5,6 @@
 # Graph topology learning on top of manifold parquet embeddings.
 #
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging

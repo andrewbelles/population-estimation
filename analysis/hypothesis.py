@@ -5,8 +5,6 @@
 # Config-driven hypothesis testing for meaningful improvement and nowcast safety.
 #
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging
@@ -21,9 +19,12 @@ from analysis.shared import (
     build_county_pair_frame,
     build_nowcast_safety_rows,
     build_state_pair_frame,
+    build_state_stratum_pair_frame,
+    build_state_worst_regression_frame,
     build_year_safety_frame,
-    one_sided_bootstrap_test,
+    one_sided_exact_sign_test,
     one_sided_majority_test,
+    one_sided_sign_flip_permutation_test,
     resolve_treatment_model,
     write_frame,
 )
@@ -79,105 +80,113 @@ def run_hypothesis_tests(bundle: AnalysisBundle) -> tuple[pd.DataFrame, pd.DataF
     state_pairs = build_state_pair_frame(
         county_pairs,
         equal_tolerance_pct=float(cfg.hypothesis.state_equal_tolerance_pct),
+        adjusted_relative_tolerance_pct=float(cfg.hypothesis.adjusted_relative_pct_threshold),
+    )
+    state_strata = build_state_stratum_pair_frame(county_pairs)
+    worst_state = build_state_worst_regression_frame(
+        county_pairs,
+        worst_regression_quantile=float(cfg.selection.worst_regression_quantile),
     )
     year_safety = build_year_safety_frame(bundle)
     safety_rows = build_nowcast_safety_rows(bundle, cfg.safety)
     results: list[dict[str, object]] = []
 
+    state_adjusted = np.asarray(state_pairs["adjusted_state_mape_error_delta_pct"], dtype=np.float64)
+    state_perm_stats = one_sided_sign_flip_permutation_test(
+        state_adjusted,
+        threshold=0.0,
+        draws=int(cfg.hypothesis.permutation_draws),
+        seed=int(cfg.hypothesis.random_seed),
+        alpha=float(cfg.hypothesis.alpha),
+        n_groups=int(state_pairs["state"].nunique()),
+    )
+    results.append(
+        _result_row(
+            hypothesis_id="state_adjusted_mape_error_delta_positive",
+            family="meaningful_improvement",
+            subset="states",
+            metric="mean_adjusted_state_mape_error_delta_pct",
+            threshold=0.0,
+            test_name=str(cfg.hypothesis.paired_test),
+            stats=state_perm_stats,
+            note="one-sample sign-flip permutation test over adjusted held-out state MAPE deltas",
+        )
+    )
+
+    state_sign_stats = one_sided_exact_sign_test(
+        state_adjusted,
+        effect_threshold=0.0,
+        success_threshold=float(cfg.hypothesis.majority_threshold),
+        alpha=float(cfg.hypothesis.alpha),
+        n_groups=int(state_pairs["state"].nunique()),
+    )
+    results.append(
+        _result_row(
+            hypothesis_id="majority_states_improve_adjusted",
+            family="meaningful_improvement",
+            subset="states",
+            metric="share_states_with_positive_adjusted_mape_error_delta",
+            threshold=float(cfg.hypothesis.majority_threshold),
+            test_name="exact_sign",
+            stats=state_sign_stats,
+            note=(
+                "exact sign test over adjusted state MAPE deltas "
+                "with effect threshold=0"
+            ),
+        )
+    )
+
     for i, stratum in enumerate(cfg.selection.improvement_strata):
-        part = county_pairs.loc[county_pairs["analysis_stratum"].astype(str) == str(stratum)].copy()
+        part = state_strata.loc[state_strata["analysis_stratum"].astype(str) == str(stratum)].copy()
         if part.empty:
-            LOGGER.warning("skip stratum hypothesis for %s because no counties matched", stratum)
+            LOGGER.warning("skip stratum hypothesis for %s because no state-stratum rows matched", stratum)
             continue
-        stats = one_sided_bootstrap_test(
-            part,
-            value_col="ape_improvement_pct",
-            threshold=float(cfg.hypothesis.non_negligible_ape_pct),
-            draws=int(cfg.hypothesis.bootstrap_draws),
+        stats = one_sided_sign_flip_permutation_test(
+            np.asarray(part["adjusted_state_stratum_mape_error_delta_pct"], dtype=np.float64),
+            threshold=0.0,
+            draws=int(cfg.hypothesis.permutation_draws),
             seed=int(cfg.hypothesis.random_seed) + i,
             alpha=float(cfg.hypothesis.alpha),
-            group_col="state",
-            strata_col="division",
+            n_groups=int(part["state"].nunique()),
         )
         results.append(
             _result_row(
-                hypothesis_id="strict_stratum_improvement",
+                hypothesis_id="state_stratum_adjusted_mape_error_delta_positive",
                 family="meaningful_improvement",
                 subset=str(stratum),
-                metric="mean_county_ape_improvement_pct",
-                threshold=float(cfg.hypothesis.non_negligible_ape_pct),
+                metric="mean_adjusted_state_stratum_mape_error_delta_pct",
+                threshold=0.0,
                 test_name=str(cfg.hypothesis.paired_test),
                 stats=stats,
-                note="state-cluster bootstrap stratified by census division over strict 2020 OOF county deltas",
+                note="one-sample sign-flip permutation test over adjusted state-stratum MAPE deltas",
             )
         )
 
-    cutoff = float(np.quantile(np.asarray(county_pairs["ape_improvement_pct"], dtype=np.float64), float(cfg.selection.worst_regression_quantile)))
-    worst = county_pairs.loc[np.asarray(county_pairs["ape_improvement_pct"], dtype=np.float64) <= cutoff].copy()
-    majority_stats = one_sided_majority_test(
-        worst["small_pop_lt_25k"],
-        threshold=float(cfg.hypothesis.majority_threshold),
-        alpha=float(cfg.hypothesis.alpha),
-    )
-    results.append(
-        _result_row(
-            hypothesis_id="worst_regressions_concentrated_lt25k",
-            family="meaningful_improvement",
-            subset=f"worst_{int(round(float(cfg.selection.worst_regression_quantile) * 100.0))}pct",
-            metric="share_small_pop_lt_25k",
-            threshold=float(cfg.hypothesis.majority_threshold),
-            test_name="exact_binomial",
-            stats=majority_stats,
-            note="tests whether the worst county-level disimprovements are majority concentrated below 25k population",
+    if worst_state.empty:
+        LOGGER.warning("skip worst-regression enrichment hypothesis because no state rows were available")
+    else:
+        enrichment_stats = one_sided_exact_sign_test(
+            np.asarray(worst_state["small_pop_enrichment"], dtype=np.float64),
+            effect_threshold=0.0,
+            success_threshold=float(cfg.hypothesis.majority_threshold),
+            alpha=float(cfg.hypothesis.alpha),
+            n_groups=int(worst_state["state"].nunique()),
         )
-    )
-
-    state_success = np.asarray(state_pairs["state_win"], dtype=bool)
-    state_stats = one_sided_majority_test(
-        state_success,
-        threshold=float(cfg.hypothesis.majority_threshold),
-        alpha=float(cfg.hypothesis.alpha),
-    )
-    results.append(
-        _result_row(
-            hypothesis_id="majority_states_improve",
-            family="meaningful_improvement",
-            subset="states",
-            metric="share_states_with_win_outcome",
-            threshold=float(cfg.hypothesis.majority_threshold),
-            test_name="exact_binomial",
-            stats=state_stats,
-            note=(
-                "tests whether a majority of state-level strict OOF estimates are wins over PEP "
-                f"using equal tolerance={cfg.hypothesis.state_equal_tolerance_pct:.6g} MAPE points"
-            ),
+        results.append(
+            _result_row(
+                hypothesis_id="worst_regressions_concentrated_lt25k",
+                family="meaningful_improvement",
+                subset=f"worst_{int(round(float(cfg.selection.worst_regression_quantile) * 100.0))}pct_states",
+                metric="share_states_with_positive_small_pop_worst_regression_enrichment",
+                threshold=float(cfg.hypothesis.majority_threshold),
+                test_name="exact_sign",
+                stats=enrichment_stats,
+                note=(
+                    "exact sign test over state-level enrichment of <25k counties among within-state worst regressions "
+                    f"using quantile={cfg.selection.worst_regression_quantile:.3f}"
+                ),
+            )
         )
-    )
-
-    fold_metrics = bundle.censal_fold_metrics.copy()
-    fold_metrics["model"] = fold_metrics["model"].astype(str).str.strip().str.lower()
-    treatment_fold = fold_metrics.loc[fold_metrics["model"] == resolved_treatment].copy()
-    leakage_stats = one_sided_majority_test(
-        np.asarray(treatment_fold["adjusted_relative_improvement_pct"], dtype=np.float64) > float(cfg.hypothesis.adjusted_relative_pct_threshold),
-        threshold=float(cfg.hypothesis.majority_threshold),
-        alpha=float(cfg.hypothesis.alpha),
-    )
-    results.append(
-        _result_row(
-            hypothesis_id="leakage_adjusted_improvement_positive",
-            family="meaningful_improvement",
-            subset="strict_folds",
-            metric="share_folds_with_positive_adjusted_relative_improvement",
-            threshold=float(cfg.hypothesis.majority_threshold),
-            test_name="exact_binomial",
-            stats=leakage_stats,
-            note=(
-                "tests whether a majority of held-out strict folds retain positive adjusted relative improvement "
-                f"after subtracting leakage-attributable gain; mean_adjusted_relative_improvement_pct="
-                f"{float(np.asarray(treatment_fold['adjusted_relative_improvement_pct'], dtype=np.float64).mean()):.6f}"
-            ),
-        )
-    )
 
     postcensal = safety_rows.loc[np.asarray(safety_rows["year"], dtype=np.int64) > int(cfg.selection.anchor_year)].copy()
     if postcensal.empty:
@@ -232,26 +241,28 @@ def parse_args() -> argparse.Namespace:
 
 def log_hypothesis_summary(*, results: pd.DataFrame, state_pairs: pd.DataFrame, summary: dict[str, object]) -> None:
     LOGGER.info(
-        "hypothesis summary baseline=%s treatment=%s passed=%d/%d state_wins=%d state_losses=%d state_equal=%d",
+        "hypothesis summary baseline=%s treatment=%s passed=%d/%d adj_state_wins=%d adj_state_losses=%d adj_state_equal=%d",
         str(summary["baseline_model"]),
         str(summary["treatment_model"]),
         int(summary["n_passed"]),
         int(summary["n_hypotheses"]),
-        int(summary["state_win_count"]),
-        int(summary["state_loss_count"]),
-        int(summary["state_equal_count"]),
+        int(summary["state_adjusted_win_count"]),
+        int(summary["state_adjusted_loss_count"]),
+        int(summary["state_adjusted_equal_count"]),
     )
     state_cols = [
         "state",
         "state_abbr",
-        "ape_improvement_pct_mean",
-        "adjusted_relative_improvement_pct_mean",
+        "adjusted_state_mape_error_delta_pct",
+        "state_adjusted_outcome",
+        "state_mape_error_delta_pct",
         "state_outcome",
+        "adjusted_state_aggregate_error_delta_pct",
     ]
     keep_state = [c for c in state_cols if c in state_pairs.columns]
     if keep_state:
         state_table = state_pairs.loc[:, keep_state].copy().sort_values(
-            ["ape_improvement_pct_mean", "state"],
+            ["adjusted_state_mape_error_delta_pct", "state"],
             ascending=[False, True],
         )
         LOGGER.info(
@@ -299,6 +310,10 @@ def main() -> None:
         "state_win_count": int(np.count_nonzero(np.asarray(state_pairs["state_win"], dtype=bool))),
         "state_loss_count": int(np.count_nonzero(np.asarray(state_pairs["state_loss"], dtype=bool))),
         "state_equal_count": int(np.count_nonzero(np.asarray(state_pairs["state_equal"], dtype=bool))),
+        "state_adjusted_threshold_pct": float(cfg.hypothesis.adjusted_relative_pct_threshold),
+        "state_adjusted_win_count": int(np.count_nonzero(np.asarray(state_pairs["state_adjusted_win"], dtype=bool))),
+        "state_adjusted_loss_count": int(np.count_nonzero(np.asarray(state_pairs["state_adjusted_loss"], dtype=bool))),
+        "state_adjusted_equal_count": int(np.count_nonzero(np.asarray(state_pairs["state_adjusted_equal"], dtype=bool))),
         "n_hypotheses": int(results.shape[0]),
         "n_passed": int(np.count_nonzero(np.asarray(results["passed"], dtype=bool))),
         "passed_hypotheses": (

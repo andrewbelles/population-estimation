@@ -5,8 +5,6 @@
 # Shared data loading, fold construction, metrics, and modeling helpers for nowcast.
 #
 
-from __future__ import annotations
-
 import logging
 import math
 from collections import Counter

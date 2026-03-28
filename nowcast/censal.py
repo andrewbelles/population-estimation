@@ -5,8 +5,6 @@
 # Strict 2020 censal evaluation against PEP using parquet-native manifold and graph outputs.
 #
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging

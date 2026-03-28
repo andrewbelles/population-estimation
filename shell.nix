@@ -26,6 +26,8 @@ pkgs.mkShell {
     python312Packages.optuna
     python312Packages.umap-learn
 
+    google-cloud-sdk
+
     cudaPackages.cudatoolkit  
     cudaPackages.nccl 
   ];

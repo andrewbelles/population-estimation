@@ -5,8 +5,6 @@
 # Parent-level analysis config and readers over parquet-native nowcast outputs.
 #
 
-from __future__ import annotations
-
 import json
 import logging
 from dataclasses import dataclass
@@ -69,10 +67,9 @@ class SelectionConfig:
 @dataclass(slots=True)
 class HypothesisTestConfig:
     paired_test: str
-    bootstrap_draws: int
+    permutation_draws: int
     alpha: float
     random_seed: int
-    non_negligible_ape_pct: float
     adjusted_relative_pct_threshold: float
     majority_threshold: float
     state_equal_tolerance_pct: float
@@ -212,11 +209,10 @@ def load_analysis_config(config_path: str | Path = "configs/analysis/config.hypo
         improvement_strata=[str(x).strip() for x in list(selection_cfg.get("improvement_strata", ["<5k", "5k-50k", "250k-1M", ">1M"]))],
     )
     hypothesis = HypothesisTestConfig(
-        paired_test=str(hypothesis_cfg.get("paired_test", "division_state_bootstrap")).strip().lower(),
-        bootstrap_draws=int(hypothesis_cfg.get("bootstrap_draws", 5000)),
+        paired_test=str(hypothesis_cfg.get("paired_test", "sign_flip_permutation")).strip().lower(),
+        permutation_draws=int(hypothesis_cfg.get("permutation_draws", hypothesis_cfg.get("bootstrap_draws", 20000))),
         alpha=float(hypothesis_cfg.get("alpha", 0.05)),
         random_seed=int(hypothesis_cfg.get("random_seed", 0)),
-        non_negligible_ape_pct=float(hypothesis_cfg.get("non_negligible_ape_pct", 0.0)),
         adjusted_relative_pct_threshold=float(hypothesis_cfg.get("adjusted_relative_pct_threshold", 0.0)),
         majority_threshold=float(hypothesis_cfg.get("majority_threshold", 0.50)),
         state_equal_tolerance_pct=float(hypothesis_cfg.get("state_equal_tolerance_pct", 1e-4)),

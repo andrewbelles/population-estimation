@@ -5,8 +5,6 @@
 # Dataset loading and parquet export utilities for manifold generation.
 #
 
-from __future__ import annotations
-
 import csv
 import logging
 import random

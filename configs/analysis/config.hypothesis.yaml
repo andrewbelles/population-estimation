@@ -32,11 +32,10 @@ selection:
     - ">1M"
 
 hypothesis:
-  paired_test: division_state_bootstrap
-  bootstrap_draws: 5000
+  paired_test: sign_flip_permutation
+  permutation_draws: 20000
   random_seed: 0
   alpha: 0.05
-  non_negligible_ape_pct: 0.0
   adjusted_relative_pct_threshold: 0.0
   majority_threshold: 0.50
   state_equal_tolerance_pct: 1.0e-4

@@ -5,8 +5,6 @@
 # Raster staging and county-tensor parquet extraction.
 #
 
-from __future__ import annotations
-
 import logging
 import shutil
 from pathlib import Path

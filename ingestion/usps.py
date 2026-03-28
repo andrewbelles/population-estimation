@@ -5,8 +5,6 @@
 # USPS raw staging plus exact county scalar aggregation for the admin pathway.
 #
 
-from __future__ import annotations
-
 import functools
 import logging
 import shutil

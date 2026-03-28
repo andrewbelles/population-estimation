@@ -5,8 +5,6 @@
 # Prototype-faithful spatial tile-bag materialization for SSL ingestion.
 #
 
-from __future__ import annotations
-
 import csv
 import json
 import logging

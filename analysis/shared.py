@@ -5,8 +5,6 @@
 # Shared transforms and statistics for hypothesis testing, tables, and future figures.
 #
 
-from __future__ import annotations
-
 from pathlib import Path
 
 import numpy as np
@@ -165,42 +163,199 @@ def build_county_pair_frame(bundle: AnalysisBundle) -> pd.DataFrame:
     return pairs.sort_values(["state", "fips"]).reset_index(drop=True)
 
 
-def build_state_pair_frame(county_pairs: pd.DataFrame, *, equal_tolerance_pct: float) -> pd.DataFrame:
+def build_state_pair_frame(
+    county_pairs: pd.DataFrame,
+    *,
+    equal_tolerance_pct: float,
+    adjusted_relative_tolerance_pct: float = 0.0,
+) -> pd.DataFrame:
     grouped = (
         county_pairs.groupby(["state", "region", "division"], as_index=False)
         .agg(
             state_abbr=("state_abbr", "first"),
             n_counties=("fips", "nunique"),
-            population_total=("y_level", "sum"),
-            baseline_ape_pop_pct_mean=("baseline_ape_pop_pct", "mean"),
-            treatment_ape_pop_pct_mean=("treatment_ape_pop_pct", "mean"),
-            adjusted_treatment_ape_pop_pct_mean=("adjusted_treatment_ape_pop_pct", "mean"),
-            ape_improvement_pct_mean=("ape_improvement_pct", "mean"),
+            baseline_state_mape_pop_pct=("baseline_ape_pop_pct", "mean"),
+            treatment_state_mape_pop_pct=("treatment_ape_pop_pct", "mean"),
+            adjusted_treatment_state_mape_pop_pct=("adjusted_treatment_ape_pop_pct", "mean"),
+            truth_total=("y_level", "sum"),
+            baseline_pred_total=("baseline_pred_level", "sum"),
+            treatment_pred_total=("treatment_pred_level", "sum"),
+            topology_leakage_proxy_mean=("topology_leakage_proxy", "mean"),
             improved_county_share=("improved", "mean"),
         )
-        .sort_values(["ape_improvement_pct_mean", "state"], ascending=[False, True])
+        .sort_values(["state", "region", "division"], ascending=[True, True, True])
         .reset_index(drop=True)
     )
-    grouped["relative_error_improvement_pct_mean"] = (
-        (np.asarray(grouped["baseline_ape_pop_pct_mean"], dtype=np.float64) - np.asarray(grouped["treatment_ape_pop_pct_mean"], dtype=np.float64))
-        / np.clip(np.asarray(grouped["baseline_ape_pop_pct_mean"], dtype=np.float64), 1e-9, None)
+    truth_total = np.asarray(grouped["truth_total"], dtype=np.float64)
+    baseline_pred_total = np.asarray(grouped["baseline_pred_total"], dtype=np.float64)
+    treatment_pred_total = np.asarray(grouped["treatment_pred_total"], dtype=np.float64)
+    grouped["state_mape_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_mape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["treatment_state_mape_pop_pct"], dtype=np.float64)
+    )
+    grouped["adjusted_state_mape_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_mape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["adjusted_treatment_state_mape_pop_pct"], dtype=np.float64)
+    )
+    grouped["state_mape_relative_improvement_pct"] = (
+        np.asarray(grouped["state_mape_error_delta_pct"], dtype=np.float64)
+        / np.clip(np.asarray(grouped["baseline_state_mape_pop_pct"], dtype=np.float64), 1e-9, None)
         * 100.0
     )
-    grouped["adjusted_relative_improvement_pct_mean"] = (
-        (np.asarray(grouped["baseline_ape_pop_pct_mean"], dtype=np.float64) - np.asarray(grouped["adjusted_treatment_ape_pop_pct_mean"], dtype=np.float64))
-        / np.clip(np.asarray(grouped["baseline_ape_pop_pct_mean"], dtype=np.float64), 1e-9, None)
+    grouped["adjusted_state_mape_relative_improvement_pct"] = (
+        np.asarray(grouped["adjusted_state_mape_error_delta_pct"], dtype=np.float64)
+        / np.clip(np.asarray(grouped["baseline_state_mape_pop_pct"], dtype=np.float64), 1e-9, None)
         * 100.0
     )
+    grouped["population_total"] = truth_total
+    grouped["baseline_state_ape_pop_pct"] = np.abs(baseline_pred_total - truth_total) / np.clip(truth_total, 1e-9, None) * 100.0
+    grouped["treatment_state_ape_pop_pct"] = np.abs(treatment_pred_total - truth_total) / np.clip(truth_total, 1e-9, None) * 100.0
+    grouped["state_aggregate_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_ape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["treatment_state_ape_pop_pct"], dtype=np.float64)
+    )
+    grouped["state_aggregate_relative_improvement_pct"] = (
+        np.asarray(grouped["state_aggregate_error_delta_pct"], dtype=np.float64)
+        / np.clip(np.asarray(grouped["baseline_state_ape_pop_pct"], dtype=np.float64), 1e-9, None)
+        * 100.0
+    )
+    grouped["state_attributable_relative_improvement_pct"] = (
+        np.maximum(np.asarray(grouped["state_aggregate_relative_improvement_pct"], dtype=np.float64), 0.0)
+        * np.asarray(grouped["topology_leakage_proxy_mean"], dtype=np.float64)
+    )
+    grouped["adjusted_state_aggregate_relative_improvement_pct"] = (
+        np.asarray(grouped["state_aggregate_relative_improvement_pct"], dtype=np.float64)
+        - np.asarray(grouped["state_attributable_relative_improvement_pct"], dtype=np.float64)
+    )
+    grouped["adjusted_treatment_state_ape_pop_pct"] = (
+        np.asarray(grouped["baseline_state_ape_pop_pct"], dtype=np.float64)
+        * (1.0 - np.asarray(grouped["adjusted_state_aggregate_relative_improvement_pct"], dtype=np.float64) / 100.0)
+    )
+    grouped["adjusted_state_aggregate_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_ape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["adjusted_treatment_state_ape_pop_pct"], dtype=np.float64)
+    )
+    grouped["ape_improvement_pct_mean"] = np.asarray(grouped["state_mape_error_delta_pct"], dtype=np.float64)
+    grouped["relative_error_improvement_pct_mean"] = np.asarray(grouped["state_mape_relative_improvement_pct"], dtype=np.float64)
+    grouped["adjusted_relative_improvement_pct_mean"] = np.asarray(grouped["adjusted_state_mape_relative_improvement_pct"], dtype=np.float64)
     grouped["state_equal_tolerance_pct"] = float(equal_tolerance_pct)
     grouped["state_outcome"] = classify_outcome(
-        np.asarray(grouped["ape_improvement_pct_mean"], dtype=np.float64),
+        np.asarray(grouped["state_mape_error_delta_pct"], dtype=np.float64),
         tolerance=float(equal_tolerance_pct),
     )
     grouped["state_win"] = grouped["state_outcome"].astype(str) == "win"
     grouped["state_loss"] = grouped["state_outcome"].astype(str) == "loss"
     grouped["state_equal"] = grouped["state_outcome"].astype(str) == "equal"
     grouped["state_improved"] = np.asarray(grouped["state_win"], dtype=bool)
+    grouped["state_adjusted_threshold_pct"] = float(adjusted_relative_tolerance_pct)
+    grouped["state_adjusted_outcome"] = classify_outcome(
+        np.asarray(grouped["adjusted_state_mape_error_delta_pct"], dtype=np.float64),
+        tolerance=float(adjusted_relative_tolerance_pct),
+    )
+    grouped["state_adjusted_win"] = grouped["state_adjusted_outcome"].astype(str) == "win"
+    grouped["state_adjusted_loss"] = grouped["state_adjusted_outcome"].astype(str) == "loss"
+    grouped["state_adjusted_equal"] = grouped["state_adjusted_outcome"].astype(str) == "equal"
+    return grouped.sort_values(["adjusted_state_mape_error_delta_pct", "state"], ascending=[False, True]).reset_index(drop=True)
+
+
+def build_state_stratum_pair_frame(county_pairs: pd.DataFrame) -> pd.DataFrame:
+    grouped = (
+        county_pairs.groupby(["state", "state_abbr", "region", "division", "analysis_stratum"], as_index=False, observed=True)
+        .agg(
+            n_counties=("fips", "nunique"),
+            baseline_state_stratum_mape_pop_pct=("baseline_ape_pop_pct", "mean"),
+            treatment_state_stratum_mape_pop_pct=("treatment_ape_pop_pct", "mean"),
+            adjusted_treatment_state_stratum_mape_pop_pct=("adjusted_treatment_ape_pop_pct", "mean"),
+            truth_total=("y_level", "sum"),
+            baseline_pred_total=("baseline_pred_level", "sum"),
+            treatment_pred_total=("treatment_pred_level", "sum"),
+            topology_leakage_proxy_mean=("topology_leakage_proxy", "mean"),
+            improved_county_share=("improved", "mean"),
+        )
+        .sort_values(["analysis_stratum", "state"], ascending=[True, True])
+        .reset_index(drop=True)
+    )
+    truth_total = np.asarray(grouped["truth_total"], dtype=np.float64)
+    baseline_pred_total = np.asarray(grouped["baseline_pred_total"], dtype=np.float64)
+    treatment_pred_total = np.asarray(grouped["treatment_pred_total"], dtype=np.float64)
+    grouped["state_stratum_mape_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_stratum_mape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["treatment_state_stratum_mape_pop_pct"], dtype=np.float64)
+    )
+    grouped["adjusted_state_stratum_mape_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_stratum_mape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["adjusted_treatment_state_stratum_mape_pop_pct"], dtype=np.float64)
+    )
+    grouped["state_stratum_mape_relative_improvement_pct"] = (
+        np.asarray(grouped["state_stratum_mape_error_delta_pct"], dtype=np.float64)
+        / np.clip(np.asarray(grouped["baseline_state_stratum_mape_pop_pct"], dtype=np.float64), 1e-9, None)
+        * 100.0
+    )
+    grouped["adjusted_state_stratum_mape_relative_improvement_pct"] = (
+        np.asarray(grouped["adjusted_state_stratum_mape_error_delta_pct"], dtype=np.float64)
+        / np.clip(np.asarray(grouped["baseline_state_stratum_mape_pop_pct"], dtype=np.float64), 1e-9, None)
+        * 100.0
+    )
+    grouped["population_total"] = truth_total
+    grouped["baseline_state_stratum_ape_pop_pct"] = np.abs(baseline_pred_total - truth_total) / np.clip(truth_total, 1e-9, None) * 100.0
+    grouped["treatment_state_stratum_ape_pop_pct"] = np.abs(treatment_pred_total - truth_total) / np.clip(truth_total, 1e-9, None) * 100.0
+    grouped["state_stratum_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_stratum_ape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["treatment_state_stratum_ape_pop_pct"], dtype=np.float64)
+    )
+    grouped["state_stratum_relative_improvement_pct"] = (
+        np.asarray(grouped["state_stratum_error_delta_pct"], dtype=np.float64)
+        / np.clip(np.asarray(grouped["baseline_state_stratum_ape_pop_pct"], dtype=np.float64), 1e-9, None)
+        * 100.0
+    )
+    grouped["state_stratum_attributable_relative_improvement_pct"] = (
+        np.maximum(np.asarray(grouped["state_stratum_relative_improvement_pct"], dtype=np.float64), 0.0)
+        * np.asarray(grouped["topology_leakage_proxy_mean"], dtype=np.float64)
+    )
+    grouped["adjusted_state_stratum_relative_improvement_pct"] = (
+        np.asarray(grouped["state_stratum_relative_improvement_pct"], dtype=np.float64)
+        - np.asarray(grouped["state_stratum_attributable_relative_improvement_pct"], dtype=np.float64)
+    )
+    grouped["adjusted_relative_improvement_pct_mean"] = np.asarray(grouped["adjusted_state_stratum_relative_improvement_pct"], dtype=np.float64)
+    grouped["adjusted_state_stratum_ape_pop_pct"] = (
+        np.asarray(grouped["baseline_state_stratum_ape_pop_pct"], dtype=np.float64)
+        * (1.0 - np.asarray(grouped["adjusted_state_stratum_relative_improvement_pct"], dtype=np.float64) / 100.0)
+    )
+    grouped["adjusted_state_stratum_error_delta_pct"] = (
+        np.asarray(grouped["baseline_state_stratum_ape_pop_pct"], dtype=np.float64)
+        - np.asarray(grouped["adjusted_state_stratum_ape_pop_pct"], dtype=np.float64)
+    )
     return grouped
+
+
+def build_state_worst_regression_frame(county_pairs: pd.DataFrame, *, worst_regression_quantile: float) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    q = float(min(max(worst_regression_quantile, 0.0), 1.0))
+    for (state, region, division), part in county_pairs.groupby(["state", "region", "division"], sort=True):
+        vals = np.asarray(part["ape_improvement_pct"], dtype=np.float64)
+        if vals.size <= 0:
+            continue
+        cutoff = float(np.quantile(vals, q))
+        worst_mask = vals <= cutoff
+        if not np.any(worst_mask):
+            continue
+        base_small_share = float(np.mean(np.asarray(part["small_pop_lt_25k"], dtype=bool)))
+        worst_small_share = float(np.mean(np.asarray(part.loc[worst_mask, "small_pop_lt_25k"], dtype=bool)))
+        rows.append(
+            {
+                "state": str(state),
+                "state_abbr": str(part["state_abbr"].iloc[0]) if "state_abbr" in part.columns and part.shape[0] > 0 else str(state),
+                "region": str(region),
+                "division": str(division),
+                "n_counties": int(part.shape[0]),
+                "n_worst": int(np.count_nonzero(worst_mask)),
+                "worst_regression_cutoff": cutoff,
+                "small_pop_base_share": base_small_share,
+                "small_pop_worst_share": worst_small_share,
+                "small_pop_enrichment": worst_small_share - base_small_share,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["small_pop_enrichment", "state"], ascending=[False, True]).reset_index(drop=True)
 
 
 def build_year_safety_frame(bundle: AnalysisBundle) -> pd.DataFrame:
@@ -298,6 +453,73 @@ def bootstrap_grouped_mean(
             samples.extend(clusters[int(j)] for j in idx.tolist())
         dist[i] = float(np.mean(np.concatenate(samples, axis=0)))
     return dist
+
+
+def one_sided_sign_flip_permutation_test(
+    values: pd.Series | np.ndarray,
+    *,
+    threshold: float,
+    draws: int,
+    seed: int,
+    alpha: float,
+    n_groups: int | None = None,
+) -> dict[str, float | int | bool]:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size <= 0:
+        raise ValueError("sign-flip permutation test requires at least one finite observation")
+    centered = arr - float(threshold)
+    observed = float(np.mean(centered))
+    rng = np.random.default_rng(int(seed))
+    draws_eff = int(max(1, draws))
+    null_stats = np.empty(draws_eff, dtype=np.float64)
+    for i in range(draws_eff):
+        signs = rng.choice(np.asarray([-1.0, 1.0], dtype=np.float64), size=centered.shape[0], replace=True)
+        null_stats[i] = float(np.mean(centered * signs))
+    p_value = float((1 + np.count_nonzero(null_stats >= observed)) / (draws_eff + 1))
+    return {
+        "estimate": float(np.mean(arr)),
+        "ci_low": float("nan"),
+        "ci_high": float("nan"),
+        "p_value": p_value,
+        "n_obs": int(arr.shape[0]),
+        "n_groups": int(n_groups if n_groups is not None else arr.shape[0]),
+        "passed": bool(float(np.mean(arr)) > float(threshold) and p_value < float(alpha)),
+    }
+
+
+def one_sided_exact_sign_test(
+    values: pd.Series | np.ndarray,
+    *,
+    effect_threshold: float,
+    success_threshold: float,
+    alpha: float,
+    tie_tolerance: float = 1e-12,
+    n_groups: int | None = None,
+) -> dict[str, float | int | bool]:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size <= 0:
+        raise ValueError("exact sign test requires at least one finite observation")
+    pos = arr > float(effect_threshold) + float(tie_tolerance)
+    neg = arr < float(effect_threshold) - float(tie_tolerance)
+    keep = np.asarray(pos | neg, dtype=bool)
+    if not np.any(keep):
+        raise ValueError("exact sign test has no non-tied observations after thresholding")
+    k = int(np.count_nonzero(pos[keep]))
+    n = int(np.count_nonzero(keep))
+    share = float(k / max(n, 1))
+    res = binomtest(k, n=n, p=0.5, alternative="greater")
+    ci = res.proportion_ci(confidence_level=max(0.0, min(1.0, 1.0 - float(alpha))), method="exact")
+    return {
+        "estimate": share,
+        "ci_low": float(ci.low),
+        "ci_high": float(ci.high),
+        "p_value": float(res.pvalue),
+        "n_obs": n,
+        "n_groups": int(n_groups if n_groups is not None else n),
+        "passed": bool(share > float(success_threshold) and float(res.pvalue) < float(alpha)),
+    }
 
 
 def one_sided_bootstrap_test(

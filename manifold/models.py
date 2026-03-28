@@ -5,8 +5,6 @@
 # Model components for manifold embedding generation.
 #
 
-from __future__ import annotations
-
 import copy
 
 import numpy as np

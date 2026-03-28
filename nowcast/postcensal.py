@@ -5,8 +5,6 @@
 # Roll-forward postcensal nowcast evaluation anchored on strict 2020 truth.
 #
 
-from __future__ import annotations
-
 import argparse
 import json
 import logging

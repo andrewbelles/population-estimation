@@ -5,8 +5,6 @@
 # YAML contract loader for parquet-native censal and postcensal nowcast runs.
 #
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any

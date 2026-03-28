@@ -5,8 +5,6 @@
 # Optimizer construction for manifold embedding models.
 #
 
-from __future__ import annotations
-
 import importlib
 from typing import Any
 

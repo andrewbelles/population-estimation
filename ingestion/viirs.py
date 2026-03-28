@@ -5,8 +5,6 @@
 # VIIRS raw staging and county tensor extraction.
 #
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

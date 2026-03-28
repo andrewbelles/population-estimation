@@ -5,8 +5,6 @@
 # County-year PEP component assembly for 2020-2024.
 #
 
-from __future__ import annotations
-
 import glob
 import logging
 import re
