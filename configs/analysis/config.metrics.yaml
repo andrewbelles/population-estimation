@@ -1,0 +1,12 @@
+paths:
+  nowcast_config: configs/nowcast/config.nowcast.yaml
+  output_root: analysis/artifacts/metrics
+
+comparison:
+  baseline_model: pep
+  treatment_model: embeddings_mem
+
+inputs:
+  censal_summary: nowcast/data/censal/summary.parquet
+  censal_fold_metrics: nowcast/data/censal/fold_metrics.parquet
+  censal_abs_errors: nowcast/data/censal/abs_errors.parquet
