@@ -502,6 +502,27 @@ def persist_strict(result: StrictResult, *, output_dir: Path) -> None:
         json.dump(result.summary, fh, indent=2)
 
 
+def log_strict_summary(result: StrictResult) -> None:
+    cols = [
+        "model",
+        "mape_pop_pct_mean",
+        "adjusted_mape_pop_pct_mean",
+        "relative_error_improvement_pct_mean",
+        "adjusted_relative_improvement_pct_mean",
+        "crps_mean",
+        "n_eval",
+    ]
+    keep = [c for c in cols if c in result.summary_df.columns]
+    if not keep:
+        return
+    table = result.summary_df.loc[:, keep].copy()
+    for col in table.columns:
+        if col == "model":
+            continue
+        table[col] = pd.to_numeric(table[col], errors="coerce")
+    LOGGER.info("strict summary\n%s", table.to_string(index=False, justify="left", float_format=lambda x: f"{x:.4f}"))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Strict 2020 censal evaluation against PEP using parquet-native artifacts.")
     parser.add_argument("--config", type=Path, default=Path("configs/nowcast/config.nowcast.yaml"))
@@ -522,6 +543,7 @@ def main() -> None:
         return
     result = evaluate_strict(config, model_key=str(args.model_key).strip() or None)
     persist_strict(result, output_dir=output_dir)
+    log_strict_summary(result)
     LOGGER.info("wrote strict outputs to %s", output_dir)
 
 

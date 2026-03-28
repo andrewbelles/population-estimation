@@ -26,10 +26,10 @@ selection:
   hard_case_quantile: 0.90
   worst_regression_quantile: 0.10
   improvement_strata:
-    - <5k
-    - 5k-50k
-    - 250k-1M
-    - >1M
+    - "<5k"
+    - "5k-50k"
+    - "250k-1M"
+    - ">1M"
 
 hypothesis:
   paired_test: division_state_bootstrap

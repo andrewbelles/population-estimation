@@ -3,7 +3,6 @@ years:
   end: 2024
 
 modalities:
-  - admin
   - viirs
   - s5p
 
@@ -15,7 +14,7 @@ paths:
   edges_parquet: graph/data/topology_edges.parquet
 
 graph:
-  graph_tag_base: gsl_gem_admin_viirs_s5p
+  graph_tag_base: gsl_gem_viirs_s5p
   pool_mode: gem
   graph_objective: barlow
   mem_top_k: 11
@@ -51,15 +50,6 @@ graph:
   seed: 0
   write_knn_reference: true
 
-admin:
-  enabled: true
-  kind: dense
-  input_parquet: manifold/data/admin_embeddings.parquet
-  family_tag_base: tabdae_vime8
-  bottleneck_dim: 0
-  bag_keep_rate: 1.0
-  gem_p_init: 3.0
-
 viirs:
   enabled: true
   kind: bag
@@ -70,7 +60,7 @@ viirs:
   gem_p_init: 4.0
 
 s5p:
-  enabled: false
+  enabled: true 
   kind: bag
   input_parquet: manifold/data/s5p_embeddings.parquet
   family_tag_base: byol_nitrous24km32

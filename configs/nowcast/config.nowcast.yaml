@@ -36,7 +36,7 @@ evaluation:
 
 graph:
   enabled: true
-  graph_tag_base: gsl_gem_admin_viirs_s5p
+  graph_tag_base: gsl_gem_viirs_s5p
   graph_kind: learned
   mem_top_k: 11
 
@@ -64,7 +64,7 @@ downstream:
     model: huber
     huber_alpha: 0.0001
     huber_epsilon: 1.35
-    huber_max_iter: 1000
+    huber_max_iter: 5000
     huber_tol: 0.00001
     huber_kernelize: false
     rolling_online_update: true
