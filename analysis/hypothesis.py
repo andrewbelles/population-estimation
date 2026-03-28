@@ -230,6 +230,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def log_hypothesis_summary(*, results: pd.DataFrame, state_pairs: pd.DataFrame, summary: dict[str, object]) -> None:
+    LOGGER.info(
+        "hypothesis summary baseline=%s treatment=%s passed=%d/%d state_wins=%d state_losses=%d state_equal=%d",
+        str(summary["baseline_model"]),
+        str(summary["treatment_model"]),
+        int(summary["n_passed"]),
+        int(summary["n_hypotheses"]),
+        int(summary["state_win_count"]),
+        int(summary["state_loss_count"]),
+        int(summary["state_equal_count"]),
+    )
+    state_cols = [
+        "state",
+        "state_abbr",
+        "ape_improvement_pct_mean",
+        "adjusted_relative_improvement_pct_mean",
+        "state_outcome",
+    ]
+    keep_state = [c for c in state_cols if c in state_pairs.columns]
+    if keep_state:
+        state_table = state_pairs.loc[:, keep_state].copy().sort_values(
+            ["ape_improvement_pct_mean", "state"],
+            ascending=[False, True],
+        )
+        LOGGER.info(
+            "state outcomes\n%s",
+            state_table.to_string(index=False, justify="left", float_format=lambda x: f"{x:.4f}"),
+        )
+    result_cols = [
+        "family",
+        "hypothesis_id",
+        "subset",
+        "estimate",
+        "threshold",
+        "p_value",
+        "passed",
+        "n_obs",
+        "n_groups",
+    ]
+    keep_result = [c for c in result_cols if c in results.columns]
+    if keep_result:
+        result_table = results.loc[:, keep_result].copy()
+        LOGGER.info(
+            "hypothesis tests\n%s",
+            result_table.to_string(index=False, justify="left", float_format=lambda x: f"{x:.4f}"),
+        )
+
+
 def main() -> None:
     args = parse_args()
     setup_logging(args.log_level)
@@ -264,6 +312,7 @@ def main() -> None:
     cfg.paths.hypothesis_summary_json.parent.mkdir(parents=True, exist_ok=True)
     with open(cfg.paths.hypothesis_summary_json, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=2)
+    log_hypothesis_summary(results=results, state_pairs=state_pairs, summary=summary)
     LOGGER.info("wrote hypothesis artifacts to %s", cfg.paths.output_root)
 
 

@@ -206,6 +206,21 @@ def build_state_pair_frame(county_pairs: pd.DataFrame, *, equal_tolerance_pct: f
 def build_year_safety_frame(bundle: AnalysisBundle) -> pd.DataFrame:
     cfg = bundle.config
     traj = bundle.county_trajectory.copy()
+    required_traj = {"fips", "state", "year", "corrected_level", "pep_level", "corrected_log", "pep_log"}
+    if traj.empty or not required_traj.issubset(set(traj.columns)):
+        return pd.DataFrame(
+            columns=[
+                "year",
+                "n_counties",
+                "is_nowcast_year",
+                "mean_abs_correction_log",
+                "max_abs_correction_log",
+                "within_abs_correction_bound_share",
+                "mean_growth_ratio",
+                "max_growth_ratio",
+                "within_growth_ratio_bound_share",
+            ]
+        )
     traj["fips"] = traj["fips"].astype(str).str.strip().str.zfill(5)
     traj["state"] = traj["state"].astype(str).str.strip().str.zfill(2)
     traj["year"] = pd.to_numeric(traj["year"], errors="raise").astype(np.int64)
@@ -237,6 +252,8 @@ def build_year_safety_frame(bundle: AnalysisBundle) -> pd.DataFrame:
         )
     year_df = pd.DataFrame(year_rows).sort_values("year").reset_index(drop=True)
     metrics = bundle.year_metrics.copy()
+    if metrics.empty or "year" not in metrics.columns:
+        return year_df
     metrics["year"] = pd.to_numeric(metrics["year"], errors="raise").astype(np.int64)
     keep_cols = [
         "year",
@@ -364,6 +381,10 @@ def build_leakage_adjusted_summary_table(bundle: AnalysisBundle) -> pd.DataFrame
         }
     )
     year_metrics = bundle.year_metrics.copy()
+    if year_metrics.empty or "year" not in year_metrics.columns or "has_truth" not in year_metrics.columns:
+        strict["postcensal_anchor_year"] = pd.NA
+        strict["postcensal_anchor_delta_mape_pct"] = pd.NA
+        return strict.sort_values("strict_adjusted_mape_pop_pct_mean").reset_index(drop=True)
     anchor_year = year_metrics.loc[year_metrics["has_truth"].astype(bool)].sort_values("year").head(1)
     if anchor_year.empty:
         strict["postcensal_anchor_year"] = pd.NA
@@ -376,6 +397,20 @@ def build_leakage_adjusted_summary_table(bundle: AnalysisBundle) -> pd.DataFrame
 
 def build_nowcast_safety_rows(bundle: AnalysisBundle, safety: SafetyConfig) -> pd.DataFrame:
     traj = bundle.county_trajectory.copy()
+    required_traj = {"state", "year", "corrected_level", "pep_level", "corrected_log", "pep_log"}
+    if traj.empty or not required_traj.issubset(set(traj.columns)):
+        return pd.DataFrame(
+            columns=[
+                "year",
+                "state",
+                "within_abs_correction_bound",
+                "within_growth_ratio_bound",
+                "abs_correction_log",
+                "growth_ratio",
+                "region",
+                "division",
+            ]
+        )
     traj["year"] = pd.to_numeric(traj["year"], errors="raise").astype(np.int64)
     traj = traj.loc[traj["year"] > int(bundle.config.selection.anchor_year)].copy()
     corrected = np.asarray(traj["corrected_level"], dtype=np.float64)

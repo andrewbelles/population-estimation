@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ import yaml
 
 from nowcast import NowcastConfig, load_config as load_nowcast_config
 from nowcast.common import load_county_display_lookup
+
+
+LOGGER = logging.getLogger("analysis.loaders")
 
 
 @dataclass(slots=True)
@@ -129,6 +133,20 @@ def _read_json(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _read_json_optional(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        LOGGER.warning("optional analysis input missing: %s", path)
+        return {}
+    return _read_json(path)
+
+
+def _read_parquet_optional(path: Path, *, columns: list[str]) -> pd.DataFrame:
+    if not path.exists():
+        LOGGER.warning("optional analysis input missing: %s", path)
+        return pd.DataFrame(columns=list(columns))
+    return pd.read_parquet(path)
+
+
 def _resolve_input(base: Path, value: str | Path) -> Path:
     path = Path(str(value)).expanduser()
     return path if path.is_absolute() else (base / path).resolve()
@@ -235,8 +253,29 @@ def load_analysis_bundle(config_path: str | Path = "configs/analysis/config.hypo
         censal_summary=pd.read_parquet(cfg.inputs.censal_summary),
         censal_fold_metrics=pd.read_parquet(cfg.inputs.censal_fold_metrics),
         censal_abs_errors=pd.read_parquet(cfg.inputs.censal_abs_errors),
-        county_trajectory=pd.read_parquet(cfg.inputs.county_trajectory),
-        year_metrics=pd.read_parquet(cfg.inputs.year_metrics),
-        county_summary=pd.read_parquet(cfg.inputs.county_summary),
-        summary_json=_read_json(cfg.inputs.summary_json),
+        county_trajectory=_read_parquet_optional(
+            cfg.inputs.county_trajectory,
+            columns=["fips", "state", "year", "corrected_level", "pep_level", "corrected_log", "pep_log"],
+        ),
+        year_metrics=_read_parquet_optional(
+            cfg.inputs.year_metrics,
+            columns=[
+                "year",
+                "fit_mode",
+                "has_truth",
+                "graph_tag",
+                "graph_kind",
+                "graph_train_loss",
+                "basis_align_mean_abs_corr",
+                "community_ari",
+                "grassmann_sqdist",
+                "topology_common_counties",
+                "delta_mape_pct",
+            ],
+        ),
+        county_summary=_read_parquet_optional(
+            cfg.inputs.county_summary,
+            columns=["year", "fips", "state"],
+        ),
+        summary_json=_read_json_optional(cfg.inputs.summary_json),
     )

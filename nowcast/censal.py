@@ -72,6 +72,7 @@ def setup_logging(level: str) -> None:
 def strict_feature_specs(direct_keys: list[str], *, mem_available: bool, requested: list[str]) -> list[tuple[str, list[str], bool, bool]]:
     specs: list[tuple[str, list[str], bool, bool]] = []
     allow = {str(x).strip().lower() for x in requested}
+    admin_keys = [str(k).strip().lower() for k in direct_keys if str(k).strip().lower() == "admin"]
     if mem_available and "mem" in allow:
         specs.append(("mem", [], True, False))
     if direct_keys:
@@ -79,10 +80,10 @@ def strict_feature_specs(direct_keys: list[str], *, mem_available: bool, request
             specs.append(("embeddings", direct_keys, False, False))
         if "embeddings_only" in allow:
             specs.append(("embeddings_only", direct_keys, False, True))
-        if mem_available and "embeddings_mem" in allow:
-            specs.append(("embeddings_mem", direct_keys, True, False))
-        if mem_available and "embeddings_mem_only" in allow:
-            specs.append(("embeddings_mem_only", direct_keys, True, True))
+        if mem_available and admin_keys and "embeddings_mem" in allow:
+            specs.append(("embeddings_mem", admin_keys, True, False))
+        if mem_available and admin_keys and "embeddings_mem_only" in allow:
+            specs.append(("embeddings_mem_only", admin_keys, True, True))
     return specs
 
 
