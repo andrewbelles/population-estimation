@@ -7,9 +7,10 @@
 
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-from scipy.stats import binomtest
+from scipy.stats import binomtest, t as student_t
 
 from analysis.loaders import AnalysisBundle, SafetyConfig
 from nowcast.common import state_division, state_region
@@ -134,15 +135,26 @@ def build_county_pair_frame(bundle: AnalysisBundle) -> pd.DataFrame:
     pairs["topology_leakage_proxy"] = pd.to_numeric(pairs["topology_leakage_proxy"], errors="coerce").fillna(0.0)
     baseline_ape = np.asarray(pairs["baseline_ape_pop_pct"], dtype=np.float64)
     treatment_ape = np.asarray(pairs["treatment_ape_pop_pct"], dtype=np.float64)
+    delta_ape = baseline_ape - treatment_ape
     relative = (baseline_ape - treatment_ape) / np.clip(baseline_ape, 1e-9, None) * 100.0
-    attributable = np.maximum(relative, 0.0) * np.asarray(pairs["topology_leakage_proxy"], dtype=np.float64)
     pairs["ape_improvement_pct"] = baseline_ape - treatment_ape
+    fold_delta = pairs.groupby("fold", sort=False)["ape_improvement_pct"].mean().rename("fold_ape_improvement_pct_mean").reset_index()
+    pairs = pairs.merge(fold_delta, on="fold", how="left", validate="many_to_one")
+    fold_delta_mean = np.asarray(pairs["fold_ape_improvement_pct_mean"], dtype=np.float64)
+    leakage_proxy = np.asarray(pairs["topology_leakage_proxy"], dtype=np.float64)
+    fold_adjustment_scale = np.where(fold_delta_mean > 0.0, 1.0 - leakage_proxy, 1.0)
+    fold_adjustment_scale = np.clip(fold_adjustment_scale, 0.0, None)
+    adjusted_delta_ape = delta_ape * fold_adjustment_scale
+    adjusted_relative = adjusted_delta_ape / np.clip(baseline_ape, 1e-9, None) * 100.0
+    attributable = relative - adjusted_relative
+    pairs["fold_adjustment_scale"] = fold_adjustment_scale
     pairs["relative_error_improvement_pct"] = relative
     pairs["attributable_relative_improvement_pct"] = attributable
-    pairs["adjusted_relative_improvement_pct"] = relative - attributable
+    pairs["adjusted_relative_improvement_pct"] = adjusted_relative
     pairs["relative_error_improvement_pct_capped"] = np.clip(np.asarray(pairs["relative_error_improvement_pct"], dtype=np.float64), -200.0, 200.0)
     pairs["adjusted_relative_improvement_pct_capped"] = np.clip(np.asarray(pairs["adjusted_relative_improvement_pct"], dtype=np.float64), -200.0, 200.0)
-    pairs["adjusted_treatment_ape_pop_pct"] = baseline_ape * (1.0 - np.asarray(pairs["adjusted_relative_improvement_pct"], dtype=np.float64) / 100.0)
+    pairs["adjusted_ape_improvement_pct"] = adjusted_delta_ape
+    pairs["adjusted_treatment_ape_pop_pct"] = baseline_ape - adjusted_delta_ape
     pairs["log_error_improvement"] = np.asarray(pairs["baseline_abs_err_log"], dtype=np.float64) - np.asarray(pairs["treatment_abs_err_log"], dtype=np.float64)
     pairs["improved"] = np.asarray(pairs["ape_improvement_pct"], dtype=np.float64) > 0.0
     pairs["worse"] = np.asarray(pairs["ape_improvement_pct"], dtype=np.float64) < 0.0
@@ -161,6 +173,55 @@ def build_county_pair_frame(bundle: AnalysisBundle) -> pd.DataFrame:
     pairs["treatment_model"] = treatment
     pairs["requested_treatment_model"] = requested_treatment
     return pairs.sort_values(["state", "fips"]).reset_index(drop=True)
+
+
+def attach_spatial_blocks(
+    county_pairs: pd.DataFrame,
+    *,
+    county_shapefile: Path,
+    block_side_km: float,
+) -> pd.DataFrame:
+    side_km = float(block_side_km)
+    if not np.isfinite(side_km) or side_km <= 0.0:
+        raise ValueError(f"block_side_km must be positive and finite, got {block_side_km!r}")
+    gdf = gpd.read_file(county_shapefile)
+    if "GEOID" not in gdf.columns:
+        raise ValueError(f"{county_shapefile}: missing GEOID")
+    if "geometry" not in gdf.columns:
+        raise ValueError(f"{county_shapefile}: missing geometry")
+    gdf = gdf.loc[:, ["GEOID", "geometry"]].copy()
+    gdf["fips"] = gdf["GEOID"].astype(str).str.strip().str.zfill(5)
+    gdf = gdf.loc[gdf["fips"].isin(county_pairs["fips"].astype(str).str.zfill(5))].copy()
+    if gdf.empty:
+        raise ValueError(f"{county_shapefile}: no county geometries matched county pairs")
+    if gdf.crs is None:
+        raise ValueError(f"{county_shapefile}: missing CRS for county geometry")
+    gdf = gdf.to_crs("EPSG:5070")
+    centroids = gdf.geometry.centroid
+    geo = pd.DataFrame(
+        {
+            "fips": gdf["fips"].astype(str).str.zfill(5),
+            "centroid_x_km": np.asarray(centroids.x, dtype=np.float64) / 1000.0,
+            "centroid_y_km": np.asarray(centroids.y, dtype=np.float64) / 1000.0,
+        }
+    )
+    out = county_pairs.merge(geo, on="fips", how="left", validate="many_to_one")
+    if np.any(~np.isfinite(np.asarray(out["centroid_x_km"], dtype=np.float64))) or np.any(~np.isfinite(np.asarray(out["centroid_y_km"], dtype=np.float64))):
+        missing = out.loc[
+            ~np.isfinite(np.asarray(out["centroid_x_km"], dtype=np.float64)) | ~np.isfinite(np.asarray(out["centroid_y_km"], dtype=np.float64)),
+            "fips",
+        ].astype(str).tolist()
+        raise ValueError(f"missing county centroids for {len(missing)} counties, e.g. {missing[:5]}")
+    out["spatial_block_col"] = np.floor(np.asarray(out["centroid_x_km"], dtype=np.float64) / side_km).astype(np.int64)
+    out["spatial_block_row"] = np.floor(np.asarray(out["centroid_y_km"], dtype=np.float64) / side_km).astype(np.int64)
+    out["spatial_block_id"] = (
+        out["division"].astype(str)
+        + ":"
+        + out["spatial_block_col"].astype(str)
+        + ":"
+        + out["spatial_block_row"].astype(str)
+    )
+    return out
 
 
 def build_state_pair_frame(
@@ -358,6 +419,25 @@ def build_state_worst_regression_frame(county_pairs: pd.DataFrame, *, worst_regr
     return pd.DataFrame(rows).sort_values(["small_pop_enrichment", "state"], ascending=[False, True]).reset_index(drop=True)
 
 
+def select_hard_case_counties(
+    county_pairs: pd.DataFrame,
+    *,
+    hard_case_quantile: float,
+    value_col: str = "baseline_ape_pop_pct",
+) -> pd.DataFrame:
+    q = float(min(max(hard_case_quantile, 0.0), 1.0))
+    vals = np.asarray(county_pairs[value_col], dtype=np.float64)
+    finite = vals[np.isfinite(vals)]
+    if finite.size <= 0:
+        return county_pairs.iloc[0:0].copy()
+    cutoff = float(np.quantile(finite, q))
+    mask = np.asarray(county_pairs[value_col], dtype=np.float64) >= cutoff
+    out = county_pairs.loc[mask].copy()
+    out["hard_case_cutoff"] = cutoff
+    out["hard_case_quantile"] = q
+    return out.sort_values([value_col, "fips"], ascending=[False, True]).reset_index(drop=True)
+
+
 def build_year_safety_frame(bundle: AnalysisBundle) -> pd.DataFrame:
     cfg = bundle.config
     traj = bundle.county_trajectory.copy()
@@ -462,29 +542,199 @@ def one_sided_sign_flip_permutation_test(
     draws: int,
     seed: int,
     alpha: float,
+    weights: pd.Series | np.ndarray | None = None,
     n_groups: int | None = None,
 ) -> dict[str, float | int | bool]:
     arr = np.asarray(values, dtype=np.float64).reshape(-1)
-    arr = arr[np.isfinite(arr)]
+    if weights is None:
+        w_full = np.ones(arr.shape[0], dtype=np.float64)
+    else:
+        w_full = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if w_full.shape[0] != arr.shape[0]:
+            raise ValueError("weights must match values length for sign-flip permutation test")
+    keep = np.isfinite(arr) & np.isfinite(w_full)
+    arr = arr[keep]
+    w = w_full[keep]
     if arr.size <= 0:
         raise ValueError("sign-flip permutation test requires at least one finite observation")
+    w = np.clip(np.asarray(w, dtype=np.float64), 0.0, None)
+    w_sum = float(np.sum(w))
+    if not np.isfinite(w_sum) or w_sum <= 0.0:
+        raise ValueError("sign-flip permutation test requires positive finite weights")
+    w = w / w_sum
     centered = arr - float(threshold)
-    observed = float(np.mean(centered))
+    observed = float(np.dot(w, centered))
+    estimate = float(np.dot(w, arr))
     rng = np.random.default_rng(int(seed))
     draws_eff = int(max(1, draws))
     null_stats = np.empty(draws_eff, dtype=np.float64)
     for i in range(draws_eff):
         signs = rng.choice(np.asarray([-1.0, 1.0], dtype=np.float64), size=centered.shape[0], replace=True)
-        null_stats[i] = float(np.mean(centered * signs))
+        null_stats[i] = float(np.dot(w, centered * signs))
     p_value = float((1 + np.count_nonzero(null_stats >= observed)) / (draws_eff + 1))
     return {
-        "estimate": float(np.mean(arr)),
+        "estimate": estimate,
         "ci_low": float("nan"),
         "ci_high": float("nan"),
         "p_value": p_value,
         "n_obs": int(arr.shape[0]),
         "n_groups": int(n_groups if n_groups is not None else arr.shape[0]),
-        "passed": bool(float(np.mean(arr)) > float(threshold) and p_value < float(alpha)),
+        "passed": bool(estimate > float(threshold) and p_value < float(alpha)),
+    }
+
+
+def _one_sided_block_sign_flip_test(
+    block_scores: np.ndarray,
+    *,
+    threshold: float,
+    alpha: float,
+    exact_max_blocks: int,
+    draws: int,
+    seed: int,
+) -> dict[str, float | int | bool]:
+    scores = np.asarray(block_scores, dtype=np.float64).reshape(-1)
+    scores = scores[np.isfinite(scores)]
+    if scores.size <= 0:
+        raise ValueError("block sign-flip test requires at least one finite block score")
+    observed = float(np.sum(scores))
+    centered = scores.copy()
+    n_blocks = int(centered.shape[0])
+    exact_limit = int(max(1, exact_max_blocks))
+    if n_blocks <= exact_limit:
+        sign_grid = ((np.arange(1 << n_blocks, dtype=np.uint64)[:, None] >> np.arange(n_blocks, dtype=np.uint64)) & 1).astype(np.int8)
+        signs = np.where(sign_grid > 0, 1.0, -1.0).astype(np.float64)
+        null_stats = signs @ centered
+        p_value = float((1 + np.count_nonzero(null_stats >= observed)) / (null_stats.shape[0] + 1))
+        test_name = "mass_weighted_block_permutation_exact"
+    else:
+        rng = np.random.default_rng(int(seed))
+        draws_eff = int(max(1, draws))
+        null_stats = np.empty(draws_eff, dtype=np.float64)
+        for i in range(draws_eff):
+            signs = rng.choice(np.asarray([-1.0, 1.0], dtype=np.float64), size=n_blocks, replace=True)
+            null_stats[i] = float(np.dot(signs, centered))
+        p_value = float((1 + np.count_nonzero(null_stats >= observed)) / (draws_eff + 1))
+        test_name = "mass_weighted_block_permutation_mc"
+    return {
+        "estimate": observed,
+        "ci_low": float("nan"),
+        "ci_high": float("nan"),
+        "p_value": p_value,
+        "n_obs": n_blocks,
+        "n_groups": n_blocks,
+        "passed": bool(observed > float(threshold) and p_value < float(alpha)),
+        "selected_test_name": test_name,
+    }
+
+
+def one_sided_spatial_block_hac_ratio_test(
+    frame: pd.DataFrame,
+    *,
+    numerator_col: str,
+    denominator_col: str,
+    threshold: float,
+    alpha: float,
+    bandwidth_km: float,
+    block_col: str = "spatial_block_id",
+    x_col: str = "centroid_x_km",
+    y_col: str = "centroid_y_km",
+    division_col: str = "division",
+    fallback_max_blocks: int | None = None,
+    exact_max_blocks: int = 20,
+    draws: int = 20000,
+    seed: int = 0,
+) -> dict[str, float | int | bool]:
+    cols = [numerator_col, denominator_col, block_col, x_col, y_col, division_col]
+    part = frame.loc[:, cols].dropna().copy()
+    if part.empty:
+        raise ValueError(f"cannot test empty frame for numerator_col={numerator_col!r} denominator_col={denominator_col!r}")
+    num = np.asarray(part[numerator_col], dtype=np.float64)
+    den = np.asarray(part[denominator_col], dtype=np.float64)
+    keep = np.isfinite(num) & np.isfinite(den) & (den > 0.0)
+    part = part.loc[keep].copy()
+    num = num[keep]
+    den = den[keep]
+    if num.size <= 1:
+        raise ValueError("spatial block HAC ratio test requires at least two finite county observations")
+    den_mean = float(np.mean(den))
+    if not np.isfinite(den_mean) or den_mean <= 0.0:
+        raise ValueError("spatial block HAC ratio test requires positive baseline denominator mean")
+    num_mean = float(np.mean(num))
+    ratio_frac = float(num_mean / den_mean)
+    estimate = float(ratio_frac * 100.0)
+    metric_mass = den / float(np.sum(den))
+    county_effect_pct = num / np.clip(den, 1e-9, None) * 100.0
+    part["_metric_mass_score"] = metric_mass * county_effect_pct
+    influence = (num - ratio_frac * den) / den_mean * 100.0
+    part["_if"] = np.asarray(influence, dtype=np.float64) / float(num.size)
+    block = (
+        part.groupby(block_col, as_index=False)
+        .agg(
+            block_score=("_if", "sum"),
+            block_metric_mass_score=("_metric_mass_score", "sum"),
+            block_x_km=(x_col, "mean"),
+            block_y_km=(y_col, "mean"),
+            division=(division_col, "first"),
+            n_counties=(numerator_col, "size"),
+        )
+        .sort_values(block_col)
+        .reset_index(drop=True)
+    )
+    n_blocks = int(block.shape[0])
+    if n_blocks <= 1:
+        raise ValueError("spatial block HAC ratio test requires at least two populated spatial blocks")
+    fallback_limit = None if fallback_max_blocks is None else int(max(0, fallback_max_blocks))
+    if fallback_limit is not None and n_blocks <= fallback_limit:
+        out = _one_sided_block_sign_flip_test(
+            np.asarray(block["block_metric_mass_score"], dtype=np.float64),
+            threshold=float(threshold),
+            alpha=float(alpha),
+            exact_max_blocks=int(exact_max_blocks),
+            draws=int(draws),
+            seed=int(seed),
+        )
+        out["estimate"] = estimate
+        out["n_obs"] = int(num.size)
+        out["n_groups"] = n_blocks
+        return out
+    scores = np.asarray(block["block_score"], dtype=np.float64)
+    x = np.asarray(block["block_x_km"], dtype=np.float64)
+    y = np.asarray(block["block_y_km"], dtype=np.float64)
+    div = block["division"].astype(str).to_numpy(dtype=object)
+    bw = float(bandwidth_km)
+    if not np.isfinite(bw) or bw <= 0.0:
+        raise ValueError(f"bandwidth_km must be positive and finite, got {bandwidth_km!r}")
+    dx = x[:, None] - x[None, :]
+    dy = y[:, None] - y[None, :]
+    dist = np.sqrt(dx * dx + dy * dy)
+    same_division = div[:, None] == div[None, :]
+    kernel = np.clip(1.0 - dist / bw, a_min=0.0, a_max=None)
+    kernel = np.where(same_division, kernel, 0.0)
+    np.fill_diagonal(kernel, 1.0)
+    variance = float(scores @ kernel @ scores)
+    variance *= float(n_blocks / max(n_blocks - 1, 1))
+    variance = max(variance, 0.0)
+    se = float(np.sqrt(variance))
+    df = int(max(n_blocks - 1, 1))
+    if se <= 0.0:
+        p_value = 0.0 if estimate > float(threshold) else 1.0
+        ci_low = estimate
+        ci_high = estimate
+    else:
+        t_stat = float((estimate - float(threshold)) / se)
+        p_value = float(1.0 - student_t.cdf(t_stat, df=df))
+        crit = float(student_t.ppf(1.0 - float(alpha) / 2.0, df=df))
+        ci_low = float(estimate - crit * se)
+        ci_high = float(estimate + crit * se)
+    return {
+        "estimate": estimate,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "p_value": p_value,
+        "n_obs": int(num.size),
+        "n_groups": n_blocks,
+        "passed": bool(estimate > float(threshold) and p_value < float(alpha)),
+        "selected_test_name": "spatial_block_hac",
     }
 
 

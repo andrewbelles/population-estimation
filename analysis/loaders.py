@@ -70,7 +70,11 @@ class HypothesisTestConfig:
     permutation_draws: int
     alpha: float
     random_seed: int
-    adjusted_relative_pct_threshold: float
+    adjusted_delta_tolerance_pct: float
+    spatial_hac_block_km: float
+    spatial_hac_bandwidth_km: float
+    spatial_block_permutation_fallback_max_blocks: int
+    spatial_block_permutation_exact_max_blocks: int
     majority_threshold: float
     state_equal_tolerance_pct: float
 
@@ -213,7 +217,16 @@ def load_analysis_config(config_path: str | Path = "configs/analysis/config.hypo
         permutation_draws=int(hypothesis_cfg.get("permutation_draws", hypothesis_cfg.get("bootstrap_draws", 20000))),
         alpha=float(hypothesis_cfg.get("alpha", 0.05)),
         random_seed=int(hypothesis_cfg.get("random_seed", 0)),
-        adjusted_relative_pct_threshold=float(hypothesis_cfg.get("adjusted_relative_pct_threshold", 0.0)),
+        adjusted_delta_tolerance_pct=float(
+            hypothesis_cfg.get(
+                "adjusted_delta_tolerance_pct",
+                hypothesis_cfg.get("adjusted_relative_pct_threshold", 0.0),
+            )
+        ),
+        spatial_hac_block_km=float(hypothesis_cfg.get("spatial_hac_block_km", 250.0)),
+        spatial_hac_bandwidth_km=float(hypothesis_cfg.get("spatial_hac_bandwidth_km", 500.0)),
+        spatial_block_permutation_fallback_max_blocks=int(hypothesis_cfg.get("spatial_block_permutation_fallback_max_blocks", 40)),
+        spatial_block_permutation_exact_max_blocks=int(hypothesis_cfg.get("spatial_block_permutation_exact_max_blocks", 20)),
         majority_threshold=float(hypothesis_cfg.get("majority_threshold", 0.50)),
         state_equal_tolerance_pct=float(hypothesis_cfg.get("state_equal_tolerance_pct", 1e-4)),
     )

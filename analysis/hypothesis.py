@@ -16,16 +16,18 @@ import pandas as pd
 
 from analysis.loaders import AnalysisBundle, load_analysis_bundle
 from analysis.shared import (
+    attach_spatial_blocks,
     build_county_pair_frame,
     build_nowcast_safety_rows,
     build_state_pair_frame,
-    build_state_stratum_pair_frame,
     build_state_worst_regression_frame,
     build_year_safety_frame,
     one_sided_exact_sign_test,
     one_sided_majority_test,
     one_sided_sign_flip_permutation_test,
+    one_sided_spatial_block_hac_ratio_test,
     resolve_treatment_model,
+    select_hard_case_counties,
     write_frame,
 )
 
@@ -77,12 +79,16 @@ def run_hypothesis_tests(bundle: AnalysisBundle) -> tuple[pd.DataFrame, pd.DataF
             resolved_treatment,
         )
     county_pairs = build_county_pair_frame(bundle)
+    county_pairs = attach_spatial_blocks(
+        county_pairs,
+        county_shapefile=bundle.nowcast_config.paths.county_shapefile,
+        block_side_km=float(cfg.hypothesis.spatial_hac_block_km),
+    )
     state_pairs = build_state_pair_frame(
         county_pairs,
         equal_tolerance_pct=float(cfg.hypothesis.state_equal_tolerance_pct),
-        adjusted_relative_tolerance_pct=float(cfg.hypothesis.adjusted_relative_pct_threshold),
+        adjusted_relative_tolerance_pct=float(cfg.hypothesis.adjusted_delta_tolerance_pct),
     )
-    state_strata = build_state_stratum_pair_frame(county_pairs)
     worst_state = build_state_worst_regression_frame(
         county_pairs,
         worst_regression_quantile=float(cfg.selection.worst_regression_quantile),
@@ -91,25 +97,95 @@ def run_hypothesis_tests(bundle: AnalysisBundle) -> tuple[pd.DataFrame, pd.DataF
     safety_rows = build_nowcast_safety_rows(bundle, cfg.safety)
     results: list[dict[str, object]] = []
 
-    state_adjusted = np.asarray(state_pairs["adjusted_state_mape_error_delta_pct"], dtype=np.float64)
-    state_perm_stats = one_sided_sign_flip_permutation_test(
-        state_adjusted,
+    county_hac_stats = one_sided_spatial_block_hac_ratio_test(
+        county_pairs,
+        numerator_col="adjusted_ape_improvement_pct",
+        denominator_col="baseline_ape_pop_pct",
         threshold=0.0,
+        alpha=float(cfg.hypothesis.alpha),
+        bandwidth_km=float(cfg.hypothesis.spatial_hac_bandwidth_km),
+        fallback_max_blocks=int(cfg.hypothesis.spatial_block_permutation_fallback_max_blocks),
+        exact_max_blocks=int(cfg.hypothesis.spatial_block_permutation_exact_max_blocks),
         draws=int(cfg.hypothesis.permutation_draws),
         seed=int(cfg.hypothesis.random_seed),
+    )
+    results.append(
+        _result_row(
+            hypothesis_id="spatial_block_hac_adjusted_relative_mape_positive",
+            family="meaningful_improvement",
+            subset="county_blocks",
+            metric="pooled_adjusted_relative_mape_improvement_pct",
+            threshold=0.0,
+            test_name=str(county_hac_stats.get("selected_test_name", "spatial_block_hac")),
+            stats=county_hac_stats,
+            note=(
+                "county-level spatial block test over pooled adjusted relative MAPE improvement; "
+                "uses division-restricted Bartlett HAC when block count is high and a mass-weighted block sign-flip permutation fallback when block count is low "
+                f"(block={float(cfg.hypothesis.spatial_hac_block_km):.1f}km, bandwidth={float(cfg.hypothesis.spatial_hac_bandwidth_km):.1f}km, "
+                f"fallback_max_blocks={int(cfg.hypothesis.spatial_block_permutation_fallback_max_blocks)})"
+            ),
+        )
+    )
+
+    hard_cases = select_hard_case_counties(
+        county_pairs,
+        hard_case_quantile=float(cfg.selection.hard_case_quantile),
+    )
+    if hard_cases.empty:
+        LOGGER.warning("skip hard-case hypothesis because no county rows matched quantile=%.3f", float(cfg.selection.hard_case_quantile))
+    else:
+        hard_case_stats = one_sided_spatial_block_hac_ratio_test(
+            hard_cases,
+            numerator_col="adjusted_ape_improvement_pct",
+            denominator_col="baseline_ape_pop_pct",
+            threshold=0.0,
+            alpha=float(cfg.hypothesis.alpha),
+            bandwidth_km=float(cfg.hypothesis.spatial_hac_bandwidth_km),
+            fallback_max_blocks=int(cfg.hypothesis.spatial_block_permutation_fallback_max_blocks),
+            exact_max_blocks=int(cfg.hypothesis.spatial_block_permutation_exact_max_blocks),
+            draws=int(cfg.hypothesis.permutation_draws),
+            seed=int(cfg.hypothesis.random_seed) + 11,
+        )
+        results.append(
+            _result_row(
+                hypothesis_id="spatial_block_hac_hard_case_adjusted_relative_mape_positive",
+                family="meaningful_improvement",
+                subset=f"top_{int(round((1.0 - float(cfg.selection.hard_case_quantile)) * 100.0))}pct_baseline_ape",
+                metric="pooled_adjusted_relative_mape_improvement_pct",
+                threshold=0.0,
+                test_name=str(hard_case_stats.get("selected_test_name", "spatial_block_hac")),
+                stats=hard_case_stats,
+                note=(
+                    "county-level spatial block test over pooled adjusted relative MAPE improvement on hard cases "
+                    "with mass-weighted block sign-flip fallback for low block counts; "
+                    f"hard cases are defined by baseline county APE >= q{float(cfg.selection.hard_case_quantile):.2f}, "
+                    f"block={float(cfg.hypothesis.spatial_hac_block_km):.1f}km, bandwidth={float(cfg.hypothesis.spatial_hac_bandwidth_km):.1f}km"
+                ),
+            )
+        )
+
+    state_adjusted = np.asarray(state_pairs["adjusted_state_mape_error_delta_pct"], dtype=np.float64)
+    state_aggregate_adjusted = np.asarray(state_pairs["adjusted_state_aggregate_error_delta_pct"], dtype=np.float64)
+    state_population_weights = np.asarray(state_pairs["population_total"], dtype=np.float64)
+    aggregate_perm_stats = one_sided_sign_flip_permutation_test(
+        state_aggregate_adjusted,
+        threshold=0.0,
+        draws=int(cfg.hypothesis.permutation_draws),
+        seed=int(cfg.hypothesis.random_seed) + 101,
         alpha=float(cfg.hypothesis.alpha),
+        weights=state_population_weights,
         n_groups=int(state_pairs["state"].nunique()),
     )
     results.append(
         _result_row(
-            hypothesis_id="state_adjusted_mape_error_delta_positive",
+            hypothesis_id="population_weighted_state_aggregate_error_delta_positive",
             family="meaningful_improvement",
-            subset="states",
-            metric="mean_adjusted_state_mape_error_delta_pct",
+            subset="states_population_weighted",
+            metric="population_weighted_adjusted_state_aggregate_error_delta_pct",
             threshold=0.0,
             test_name=str(cfg.hypothesis.paired_test),
-            stats=state_perm_stats,
-            note="one-sample sign-flip permutation test over adjusted held-out state MAPE deltas",
+            stats=aggregate_perm_stats,
+            note="state sign-flip permutation test over adjusted aggregate error deltas weighted by true state population",
         )
     )
 
@@ -136,29 +212,37 @@ def run_hypothesis_tests(bundle: AnalysisBundle) -> tuple[pd.DataFrame, pd.DataF
         )
     )
 
-    for i, stratum in enumerate(cfg.selection.improvement_strata):
-        part = state_strata.loc[state_strata["analysis_stratum"].astype(str) == str(stratum)].copy()
+    for stratum in cfg.selection.improvement_strata:
+        part = county_pairs.loc[county_pairs["analysis_stratum"].astype(str) == str(stratum)].copy()
         if part.empty:
-            LOGGER.warning("skip stratum hypothesis for %s because no state-stratum rows matched", stratum)
+            LOGGER.warning("skip stratum hypothesis for %s because no county rows matched", stratum)
             continue
-        stats = one_sided_sign_flip_permutation_test(
-            np.asarray(part["adjusted_state_stratum_mape_error_delta_pct"], dtype=np.float64),
+        stats = one_sided_spatial_block_hac_ratio_test(
+            part,
+            numerator_col="adjusted_ape_improvement_pct",
+            denominator_col="baseline_ape_pop_pct",
             threshold=0.0,
-            draws=int(cfg.hypothesis.permutation_draws),
-            seed=int(cfg.hypothesis.random_seed) + i,
             alpha=float(cfg.hypothesis.alpha),
-            n_groups=int(part["state"].nunique()),
+            bandwidth_km=float(cfg.hypothesis.spatial_hac_bandwidth_km),
+            fallback_max_blocks=int(cfg.hypothesis.spatial_block_permutation_fallback_max_blocks),
+            exact_max_blocks=int(cfg.hypothesis.spatial_block_permutation_exact_max_blocks),
+            draws=int(cfg.hypothesis.permutation_draws),
+            seed=int(cfg.hypothesis.random_seed),
         )
         results.append(
             _result_row(
-                hypothesis_id="state_stratum_adjusted_mape_error_delta_positive",
+                hypothesis_id="spatial_block_hac_stratum_adjusted_relative_mape_positive",
                 family="meaningful_improvement",
                 subset=str(stratum),
-                metric="mean_adjusted_state_stratum_mape_error_delta_pct",
+                metric="pooled_adjusted_relative_mape_improvement_pct",
                 threshold=0.0,
-                test_name=str(cfg.hypothesis.paired_test),
+                test_name=str(stats.get("selected_test_name", "spatial_block_hac")),
                 stats=stats,
-                note="one-sample sign-flip permutation test over adjusted state-stratum MAPE deltas",
+                note=(
+                    "county-level spatial block test within population stratum over pooled adjusted relative MAPE improvement; "
+                    "uses division-restricted Bartlett HAC when block count is high and a mass-weighted block sign-flip permutation fallback when block count is low "
+                    f"(block={float(cfg.hypothesis.spatial_hac_block_km):.1f}km, bandwidth={float(cfg.hypothesis.spatial_hac_bandwidth_km):.1f}km)"
+                ),
             )
         )
 
@@ -273,6 +357,7 @@ def log_hypothesis_summary(*, results: pd.DataFrame, state_pairs: pd.DataFrame, 
         "family",
         "hypothesis_id",
         "subset",
+        "test_name",
         "estimate",
         "threshold",
         "p_value",
@@ -310,7 +395,7 @@ def main() -> None:
         "state_win_count": int(np.count_nonzero(np.asarray(state_pairs["state_win"], dtype=bool))),
         "state_loss_count": int(np.count_nonzero(np.asarray(state_pairs["state_loss"], dtype=bool))),
         "state_equal_count": int(np.count_nonzero(np.asarray(state_pairs["state_equal"], dtype=bool))),
-        "state_adjusted_threshold_pct": float(cfg.hypothesis.adjusted_relative_pct_threshold),
+        "state_adjusted_threshold_pct": float(cfg.hypothesis.adjusted_delta_tolerance_pct),
         "state_adjusted_win_count": int(np.count_nonzero(np.asarray(state_pairs["state_adjusted_win"], dtype=bool))),
         "state_adjusted_loss_count": int(np.count_nonzero(np.asarray(state_pairs["state_adjusted_loss"], dtype=bool))),
         "state_adjusted_equal_count": int(np.count_nonzero(np.asarray(state_pairs["state_adjusted_equal"], dtype=bool))),

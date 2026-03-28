@@ -1,5 +1,5 @@
 years: [2020, 2021, 2022, 2023, 2024]
-modalities: [s5p]
+modalities: [viirs, s5p]
 
 paths:
   geo_coords_path: ingestion/metadata/geography/2020_Gaz_counties_national.txt
