@@ -105,13 +105,13 @@ To handle low effective sample size and spatial dependence, I do not treat count
 | Supporting | A meaningful share of states improve | 63.8% | 0.0395 | Passed |
 | Supporting | `5k - 50k` stratum improves | 3.29% | 0.0031 | Passed |
 
-| Mixed / Secondary | Estimate | p-value | Result | Notes |
+| Proposition | Estimate | p-value | Result | Notes |
 | --- | ---: | ---: | --- | --- |
 | `< 5k` stratum improves | 3.59% | 0.0647 | Not significant | Positive, near threshold |
 | `250k - 1M` stratum improves | 6.37% | 0.2255 | Not significant | Positive |
 | `> 1M` stratum improves | 6.88% | 0.4199 | Not significant | Uses low-block mass-weighted block permutation fallback |
 | Population-weighted state aggregate error improves | 0.0977 | 0.2803 | Not significant | Positive robustness result |
-| Worst disimprovements are majority concentrated in `< 25k` | 0.5476 | 0.3220 | Not significant | Majority share not distinguishable from threshold |
+| Worst disimprovements are concentrated in `< 25k` | 0.5476 | 0.3220 | Not significant | Majority share not distinguishable from threshold |
 
 | Safety Proposition | Estimate | p-value | Result |
 | --- | ---: | ---: | --- |
